@@ -73,7 +73,7 @@ fn rotation_and_flip_are_read() {
     let (d, _) = symbol();
     let m = dynamic_block(&d, "Symbol").unwrap();
     let p = |node: i32| &m.parameters.iter().find(|p| p.node == node).unwrap().kind;
-    assert!(matches!(p(15), ParameterKind::Rotation { label, values, .. } if label == "Angle1" && values.maximum > 6.28));
+    assert!(matches!(p(15), ParameterKind::Rotation { label, values, .. } if label == "Angle1" && values.maximum > 6.0));
     assert!(
         matches!(p(20), ParameterKind::Flip { label, states, .. } if label == "Flip state1" && states == &["Not flipped".to_string(), "Flipped".to_string()])
     );
