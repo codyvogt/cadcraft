@@ -22,6 +22,7 @@ pub mod lisp;
 pub mod mtext_edit;
 pub mod pointmod;
 pub mod prompt;
+pub mod properties;
 mod recent;
 pub mod sample;
 pub mod select;
