@@ -22,7 +22,7 @@ use crate::{Drawing, Handle, RawTag};
 mod apply;
 mod grips;
 mod reference;
-pub use apply::{drag_grip, set_property};
+pub use apply::{drag_grip, grip_stops, set_property};
 pub use grips::{DynGrip, GripPart, GripShape, grips};
 pub use reference::{CustomProperty, Reference, Value, custom_properties, reference};
 
