@@ -477,6 +477,81 @@ pub fn drag_grip(d: &mut Drawing, insert: Handle, node: i32, part: super::GripPa
     apply(d, insert, &r.definition, &r.values, &plan.set, node)
 }
 
+/// Most stops one grip shows.
+const MAX_STOPS: usize = 200;
+
+/// The values a value set stops at, for tick marks: its list, or each increment from its minimum
+/// to its maximum (to `open_to` without a maximum). None for a value set that takes any value.
+fn stops(set: &super::ValueSet, open_to: f64) -> Vec<f64> {
+    let within = |v: f64| {
+        v.is_finite() && (!set.has_minimum() || v >= set.minimum - 1e-9) && (!set.has_maximum() || set.maximum <= 0.0 || v <= set.maximum + 1e-9)
+    };
+    if set.is_list() {
+        return set.list.iter().copied().filter(|v| within(*v)).take(MAX_STOPS).collect();
+    }
+    if !(set.has_increment() && set.increment > 0.0 && set.increment.is_finite()) {
+        return Vec::new();
+    }
+    let from = if set.has_minimum() { set.minimum } else { 0.0 };
+    let to = if set.has_maximum() && set.maximum > 0.0 { set.maximum } else { open_to };
+    (0..MAX_STOPS).map(|k| from + k as f64 * set.increment).take_while(|v| *v <= to + 1e-9).filter(|v| within(*v)).collect()
+}
+
+/// Where grip `part` of parameter `node` of dynamic block reference `insert` can stop when its
+/// parameter's values are a list or go by an increment, as AutoCAD marks them while the grip is
+/// dragged: each stop's point and the way the grip travels there (unit vectors, drawing
+/// coordinates). Empty when the grip goes anywhere.
+pub fn grip_stops(d: &Drawing, insert: Handle, node: i32, part: super::GripPart) -> Vec<(Vec2, Vec2)> {
+    use super::GripPart;
+    let Some(r) = reference(d, insert) else { return Vec::new() };
+    let Some(m) = dynamic_block(d, &r.definition) else { return Vec::new() };
+    let Some(EntityKind::Insert(ins)) = d.entity(insert).map(|e| &e.kind) else { return Vec::new() };
+    let Some(p) = m.parameters.iter().find(|p| p.node == node) else { return Vec::new() };
+    let Some(Val::Points(b, e)) = current(&m, &r.values, node) else { return Vec::new() };
+    let len = (e - b).len();
+    if len < 1e-12 {
+        return Vec::new();
+    }
+    let u = (e - b) * (1.0 / len);
+    // In the block: (point, travel direction).
+    let local: Vec<(Vec3, Vec3)> = match (&p.kind, part) {
+        (ParameterKind::Linear { values, from_midpoint, .. }, GripPart::Base | GripPart::End) => {
+            let mid = (b + e) * 0.5;
+            stops(values, 2.0 * len)
+                .into_iter()
+                .filter(|v| *v > 0.0)
+                .map(|v| match (from_midpoint, part) {
+                    (true, GripPart::Base) => (mid - u * (v / 2.0), u * -1.0),
+                    (true, _) => (mid + u * (v / 2.0), u),
+                    (false, GripPart::Base) => (e - u * v, u * -1.0),
+                    (false, _) => (b + u * v, u),
+                })
+                .collect()
+        }
+        // A full turn is where no turn is.
+        (ParameterKind::Rotation { base: hb, end: he, values, .. }, GripPart::End) => stops(values, std::f64::consts::TAU)
+            .into_iter()
+            .filter(|a| *a < std::f64::consts::TAU - 1e-9)
+            .map(|a| {
+                let at = rotation_end(b, e, (*hb, *he), a);
+                let radial = (at - b).xy();
+                (at, radial.perp().to3(0.0))
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let base = d.block(&r.definition).map(|b| b.base.xy()).unwrap_or_default();
+    let xf = ins.transform(base);
+    local
+        .into_iter()
+        .filter_map(|(at, way)| {
+            let (p, ahead) = (xf.apply(at.xy()), xf.apply(at.xy() + way.xy()));
+            let dir = ahead - p;
+            (dir.len() > 1e-12 && p.is_finite()).then(|| (p, dir * (1.0 / dir.len())))
+        })
+        .collect()
+}
+
 /// The change of each parameter value an action can follow, by parameter graph id and the
 /// connection's name ("EndXDelta", "XDelta"…), from `old` and `new` values.
 fn delta(old: &Val, new: &Val, connection: &str) -> f64 {
