@@ -96,6 +96,36 @@ enum Val {
     Flip(Vec3, Vec3, bool),
     /// A flip grip's state: its value record's last group 70.
     State(bool),
+    /// Where a visibility or lookup parameter is, when an action carries it, with its state or
+    /// value (unchanged; its record holds both).
+    At(Vec3, String),
+}
+
+/// What an action carries of parameter `node`: the value this change has given it so far, else
+/// its current one; of a visibility or lookup parameter, its position (its state or value stays).
+/// None for a parameter whose state this change sets (it stays where it is).
+fn carried(m: &DynamicBlock, values: &BTreeMap<i32, Value>, new: &BTreeMap<i32, Val>, node: i32) -> Option<Val> {
+    match new.get(&node) {
+        Some(Val::Text(_)) => None,
+        Some(v) => Some(v.clone()),
+        None => match current(m, values, node)? {
+            Val::Text(t) => located(m, values, node).map(|p| Val::At(p, t)),
+            v => Some(v),
+        },
+    }
+}
+
+/// Where a visibility or lookup parameter is on a reference: as its record has it, else as the
+/// dynamic block has it.
+fn located(m: &DynamicBlock, values: &BTreeMap<i32, Value>, node: i32) -> Option<Vec3> {
+    let home = m.parameters.iter().find(|p| p.node == node).and_then(|p| match &p.kind {
+        ParameterKind::Visibility { at, .. } | ParameterKind::Lookup { at, .. } => Some(*at),
+        _ => None,
+    })?;
+    Some(match values.get(&node) {
+        Some(Value::Text { at: Some(q), .. }) => *q,
+        _ => home,
+    })
 }
 
 /// A rotation parameter's angle (radians, 0 to 2π): its end's direction from its base, from the
@@ -165,7 +195,7 @@ fn current(m: &DynamicBlock, values: &BTreeMap<i32, Value>, node: i32) -> Option
     let p = m.parameters.iter().find(|p| p.node == node)?;
     let given = values.get(&node);
     Some(match (&p.kind, given) {
-        (_, Some(Value::Text { value })) => Val::Text(value.clone()),
+        (_, Some(Value::Text { value, .. })) => Val::Text(value.clone()),
         (_, Some(Value::Point { at })) => Val::Point(*at),
         (_, Some(Value::Points { base, end })) => Val::Points(*base, *end),
         (_, Some(Value::Flip { base, end, flipped })) => Val::Flip(*base, *end, *flipped),
@@ -580,10 +610,11 @@ fn apply(
                     if set.contains_key(node) {
                         continue;
                     }
-                    let Some(cur) = new.get(node).cloned().or_else(|| current(&m, values, *node)) else { continue };
+                    let Some(cur) = carried(&m, values, &new, *node) else { continue };
                     let p = |q: Vec3| t.apply(q.xy()).to3(q.z);
                     let moved = match cur {
                         Val::Point(q) => Val::Point(p(q)),
+                        Val::At(q, t) => Val::At(p(q), t),
                         Val::Points(b, e) => Val::Points(p(b), p(e)),
                         Val::Flip(b, e, f) => Val::Flip(p(b), p(e), f),
                         other => other,
@@ -631,7 +662,7 @@ fn apply(
                 if set.contains_key(node) {
                     continue;
                 }
-                let Some(cur) = new.get(node).cloned().or_else(|| current(&m, values, *node)) else { continue };
+                let Some(cur) = carried(&m, values, &new, *node) else { continue };
                 let home = current(&m, &BTreeMap::new(), *node);
                 let shift = |p: Vec3, at: Option<Vec3>| {
                     if frame.is_empty() || in_frame(frame, at.unwrap_or(p).xy()) { p + v.to3(0.0) } else { p }
@@ -639,6 +670,7 @@ fn apply(
                 let moved = match (cur, home) {
                     (Val::Point(p), Some(Val::Point(h))) => Val::Point(shift(p, Some(h))),
                     (Val::Point(p), _) => Val::Point(shift(p, None)),
+                    (Val::At(p, t), _) => Val::At(shift(p, located(&m, &BTreeMap::new(), *node)), t),
                     (Val::Points(b, e), Some(Val::Points(hb, he))) => Val::Points(shift(b, Some(hb)), shift(e, Some(he))),
                     (Val::Points(b, e), _) => Val::Points(shift(b, None), shift(e, None)),
                     (Val::Flip(b, e, f), Some(Val::Flip(hb, he, _))) => Val::Flip(shift(b, Some(hb)), shift(e, Some(he)), f),
@@ -1093,6 +1125,10 @@ fn write_value(tags: &mut Vec<RawTag>, v: &Val) {
             return;
         }
         Val::Point(p) => vec![*p],
+        Val::At(p, t) => {
+            write_value(tags, &Val::Text(t.clone()));
+            vec![*p]
+        }
         Val::Points(b, e) | Val::Flip(b, e, _) => vec![*b, *e],
         Val::State(f) => {
             set_state(tags, *f);
