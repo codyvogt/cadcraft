@@ -1063,11 +1063,16 @@ fn write_value(tags: &mut Vec<RawTag>, v: &Val) {
     }
 }
 
-/// Set a record's state, its last group 70 after the header's two (`70 25`, `70 104`), adding
-/// it when the record has none.
+/// Set a record's state: a flip value's group 70 after its points, a flip grip's last group 70
+/// after the header's two (`70 25`, `70 104`); added at the end when the record has none.
 fn set_state(tags: &mut Vec<RawTag>, on: bool) {
+    let first_point = tags.iter().position(|t| t.code == 10);
     let at: Vec<usize> = tags.iter().enumerate().filter(|(_, t)| t.code == 70).map(|(i, _)| i).collect();
-    match at.get(2..).and_then(|rest| rest.last()) {
+    let last = match first_point {
+        Some(p) => at.iter().rev().find(|i| **i > p),
+        None => at.get(2..).and_then(|rest| rest.last()),
+    };
+    match last {
         Some(&i) => {
             if let Some(t) = tags.get_mut(i) {
                 t.value = i32::from(on).to_string();
@@ -1151,6 +1156,6 @@ mod tests {
         anon.entities.push(tagged(5, Some("20")));
         anon.entities.push(tagged(6, None));
         assert_eq!(by_tag(&d, &def), vec![(10, Handle(1)), (20, Handle(2))]);
-        assert_eq!(by_tag(&d, &anon), vec![(20, Handle(5)), (1_000_002, Handle(6))]);
+        assert_eq!(by_tag(&d, &anon), vec![(20, Handle(5)), (1_000_001, Handle(6))]);
     }
 }
