@@ -94,7 +94,8 @@ fn entries(objects: &HashMap<Handle, &ForeignObject>, dict: Handle) -> Vec<(Stri
 }
 
 /// A value XRECORD: its text (group 1) when it has one, else its points (10/20/30); a flip
-/// parameter's also ends with its state, a group 70 after the header's two (`70 25`, `70 104`).
+/// parameter's also has its state, a group 70 after its points (the header's `70 25`, `70 104`
+/// come before them).
 fn value(o: &ForeignObject) -> Option<Value> {
     if let Some(t) = o.tags.iter().find(|t| t.code == 1) {
         return Some(Value::Text { value: t.value.clone() });
@@ -103,9 +104,10 @@ fn value(o: &ForeignObject) -> Option<Value> {
         o.tags.iter().filter(|t| t.code == code).nth(i).and_then(|t| t.value.trim().parse::<f64>().ok()).filter(|v| v.is_finite())
     };
     let point = |i: usize| Some(Vec3::new(num(10, i)?, num(20, i)?, num(30, i).unwrap_or(0.0)));
-    let states: Vec<&str> = o.tags.iter().filter(|t| t.code == 70).map(|t| t.value.trim()).collect();
+    let first_point = o.tags.iter().position(|t| t.code == 10).unwrap_or(o.tags.len());
+    let state = o.tags.get(first_point..).unwrap_or_default().iter().rev().find(|t| t.code == 70).map(|t| t.value.trim() == "1");
     match (point(0), point(1)) {
-        (Some(base), Some(end)) if states.len() > 2 => Some(Value::Flip { base, end, flipped: states.last() == Some(&"1") }),
+        (Some(base), Some(end)) if state.is_some() => Some(Value::Flip { base, end, flipped: state == Some(true) }),
         (Some(base), Some(end)) => Some(Value::Points { base, end }),
         (Some(at), None) => Some(Value::Point { at }),
         _ => None,
