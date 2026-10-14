@@ -134,7 +134,9 @@ impl Interactive for DynGripEdit {
             GripShape::Rotation => ("** ROTATE ** Specify rotation point or angle", Accept::POINT_OR_NUMBER),
             _ => ("** STRETCH ** Specify stretch point", Accept::POINT),
         };
-        Prompt::new(msg, accept).kw(&["eXit"]).base(self.from)
+        let p = Prompt::new(msg, accept).kw(&["eXit"]).base(self.from);
+        // A rotation grip asks for an angle: Dynamic Input shows one angle box.
+        if self.shape == GripShape::Rotation { p.angle() } else { p }
     }
 
     fn input(&mut self, s: &mut Session, i: Input) -> Result<Step> {
@@ -158,6 +160,17 @@ impl Interactive for DynGripEdit {
     /// The rubber band from the grip.
     fn preview(&self, _s: &Session, c: Vec2) -> Vec<EntityKind> {
         vec![crate::cmd::helpers::line(self.from, c)]
+    }
+
+    /// A rotation grip's angle at the cursor, as Properties will show it.
+    fn live_value(&self, s: &Session, c: Vec2) -> Option<String> {
+        if self.shape != GripShape::Rotation {
+            return None;
+        }
+        let mut d = s.doc().ok()?.clone();
+        dynblock::drag_grip(&mut d, self.handle, self.node, self.part, c).ok()?;
+        let (_, props) = dynblock::custom_properties(&d, self.handle)?;
+        props.into_iter().find(|p| p.name.eq_ignore_ascii_case(&self.property)).map(|p| format!("{}°", p.value))
     }
 
     /// The reference re-evaluated at the cursor, drawn as it will look (its own colours, so
