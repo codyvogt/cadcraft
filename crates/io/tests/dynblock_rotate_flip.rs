@@ -25,8 +25,12 @@ fn dxf(src: &str) -> String {
 
 /// Symbol and a reference to it at (100, 100) with its attribute.
 fn symbol() -> (Drawing, Handle) {
-    let src = include_str!("data/dynblock_symbol.txt").replace("\r\n", "\n");
-    let mut d = read_dxf(dxf(&src).as_bytes()).unwrap();
+    symbol_from(&include_str!("data/dynblock_symbol.txt").replace("\r\n", "\n"))
+}
+
+/// As [`symbol`], from the fixture's text `src` (changed by a test).
+fn symbol_from(src: &str) -> (Drawing, Handle) {
+    let mut d = read_dxf(dxf(src).as_bytes()).unwrap();
     let def =
         d.block("Symbol").unwrap().entities.iter().find_map(|e| if let EntityKind::AttDef(a) = &e.kind { Some(a.clone()) } else { None }).unwrap();
     let mut a = def.clone();
@@ -140,6 +144,26 @@ fn rotation_and_flip_grips() {
     // A flip grip is clicked, not dragged; the base of the angle is not a point to aim at.
     assert!(drag_grip(&mut d, r, 20, GripPart::Base, Vec2::new(90.0, 90.0)).is_err());
     assert!(drag_grip(&mut d, r, 15, GripPart::End, Vec2::new(100.0, 100.0)).is_err());
+}
+
+#[test]
+fn a_rotation_grip_off_the_radius_stays_where_its_grip_object_is() {
+    // The grip object a quarter turn round from the radius' end (as AutoCAD saves blocks whose
+    // grip was moved there): the circle is drawn there and turns with the angle, and dragging
+    // it turns the block by the cursor's turn, not to the cursor's direction.
+    let src = include_str!("data/dynblock_symbol.txt")
+        .replace("\r\n", "\n")
+        .replace("100 AcDbBlockGrip\n91 0\n92 0\n1010 2\n1020 0\n", "100 AcDbBlockGrip\n91 0\n92 0\n1010 0\n1020 2\n");
+    let (mut d, r) = symbol_from(&src);
+    let at = |d: &Drawing| grips(d, r).into_iter().find(|g| g.shape == GripShape::Rotation).map(|g| g.at).unwrap();
+    assert!(near(at(&d), (100.0, 102.0)), "{:?}", at(&d));
+    // Dropped where it is: no turn.
+    drag_grip(&mut d, r, 15, GripPart::End, Vec2::new(100.0, 102.0)).unwrap();
+    assert!(props(&d, r).contains(&("Angle1".to_string(), "0".to_string())), "{:?}", props(&d, r));
+    // A quarter turn further round: Angle1 90, and the grip is there.
+    drag_grip(&mut d, r, 15, GripPart::End, Vec2::new(98.0, 100.0)).unwrap();
+    assert!(props(&d, r).contains(&("Angle1".to_string(), "90".to_string())), "{:?}", props(&d, r));
+    assert!(near(at(&d), (98.0, 100.0)), "{:?}", at(&d));
 }
 
 #[test]

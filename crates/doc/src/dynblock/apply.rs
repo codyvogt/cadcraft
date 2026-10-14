@@ -412,7 +412,16 @@ pub fn drag_grip(d: &mut Drawing, insert: Handle, node: i32, part: super::GripPa
             if (q3 - b).len() < 1e-12 {
                 return Err(format!("{label} needs a point away from its base."));
             }
-            let a = allowed(values, rotation_angle(b, q3, (*hb, *he)));
+            // The grip is where its grip object is, which can be off the radius' end: the
+            // cursor turns the grip, so the angle is the cursor's less that offset.
+            let offset = p
+                .grips
+                .get(1)
+                .and_then(|id| m.grip_points.iter().find(|(g, _)| g == id))
+                .map(|(_, g)| rotation_angle(*hb, *g, (*hb, *he)))
+                .filter(|_| (*he - *hb).len() > 1e-12)
+                .unwrap_or(0.0);
+            let a = allowed(values, (rotation_angle(b, q3, (*hb, *he)) - offset).rem_euclid(std::f64::consts::TAU));
             plan.set.insert(node, Val::Points(b, rotation_end(b, e, (*hb, *he), a)));
             plan.chain(&m, &r.values, node, "UpdatedAngle")?;
         }
