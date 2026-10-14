@@ -74,9 +74,18 @@ fn outline(xf: &Xf, g: &DynGrip, gs: f32) -> Vec<Pos2> {
             let ahead = xf.to_screen(g.at + g.dir) - c;
             let u = if ahead.length() > 1e-6 { ahead / ahead.length() } else { vec2(0.0, -1.0) };
             let n = vec2(-u.y, u.x);
-            // Longer and narrower than a distance's arrow (the painter fills convex shapes).
-            let (len, half) = (gs * 2.4, gs * 0.8);
-            vec![c - u * (len * 0.5) + n * half, c + u * (len * 0.6), c - u * (len * 0.5) - n * half]
+            // A block arrow, as AutoCAD draws it: a short shaft and a head about as wide as a
+            // square grip. Tail, shaft's end and head's back on one side, the tip, then back.
+            let (tail, neck, tip, shaft, head) = (gs * 1.4, gs * 0.2, gs * 1.4, gs * 0.5, gs * 1.4);
+            vec![
+                c - u * tail + n * shaft,
+                c - u * neck + n * shaft,
+                c - u * neck + n * head,
+                c + u * tip,
+                c - u * neck - n * head,
+                c - u * neck - n * shaft,
+                c - u * tail - n * shaft,
+            ]
         }
     }
 }
@@ -107,7 +116,18 @@ pub(crate) fn draw(app: &mut CadApp, painter: &Painter, xf: &Xf, rect: Rect, hov
         } else {
             t.grip_dyn
         };
-        painter.add(Shape::convex_polygon(pts, fill, Stroke::new(1.0, Color32::from_rgb(0x10, 0x30, 0x80))));
+        let stroke = Stroke::new(1.0, Color32::from_rgb(0x10, 0x30, 0x80));
+        match (g.shape, pts.as_slice()) {
+            // The flip arrow isn't convex: its shaft and head are filled apart, then outlined.
+            (GripShape::Flip, [t0, n0, h0, tip, h1, n1, t1]) => {
+                painter.add(Shape::convex_polygon(vec![*t0, *n0, *n1, *t1], fill, Stroke::NONE));
+                painter.add(Shape::convex_polygon(vec![*h0, *tip, *h1], fill, Stroke::NONE));
+                painter.add(Shape::closed_line(pts.clone(), stroke));
+            }
+            _ => {
+                painter.add(Shape::convex_polygon(pts, fill, stroke));
+            }
+        }
     }
 }
 
