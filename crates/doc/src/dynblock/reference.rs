@@ -141,9 +141,26 @@ pub fn reference(d: &Drawing, insert: Handle) -> Option<Reference> {
 }
 
 /// An angle (radians) as Properties shows it: degrees with AUPREC decimals.
+/// An angle parameter's value `a` (radians, counterclockwise) as the drawing shows angles: from
+/// ANGBASE, clockwise when ANGDIR is 1 (AutoCAD shows a 0 angle as 90 in a drawing measured
+/// clockwise from north, and 0.5 rad as 61.35).
+pub(super) fn angle_shown(d: &Drawing, a: f64) -> f64 {
+    let base = d.header.f64("ANGBASE", 0.0);
+    let shown = if d.header.i64("ANGDIR", 0) == 1 { base - a } else { a - base };
+    shown.rem_euclid(std::f64::consts::TAU)
+}
+
+/// The value of an angle parameter shown (or typed) as `v` (radians): the inverse of
+/// [`angle_shown`].
+pub(super) fn angle_from_shown(d: &Drawing, v: f64) -> f64 {
+    let base = d.header.f64("ANGBASE", 0.0);
+    let a = if d.header.i64("ANGDIR", 0) == 1 { base - v } else { v + base };
+    a.rem_euclid(std::f64::consts::TAU)
+}
+
 fn angle_text(d: &Drawing, a: f64) -> String {
     let prec = usize::try_from(d.header.i64("AUPREC", 0).clamp(0, 8)).unwrap_or(0);
-    format!("{:.prec$}", a.to_degrees())
+    format!("{:.prec$}", angle_shown(d, a).to_degrees())
 }
 
 /// A number as the drawing shows lengths (LUPREC decimals).

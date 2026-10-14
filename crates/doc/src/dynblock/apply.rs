@@ -326,7 +326,8 @@ pub fn set_property(d: &mut Drawing, insert: Handle, name: &str, value: &str) ->
         }
         // An angle in degrees, as Properties shows it, snapped to the parameter's values.
         (ParameterKind::Rotation { base: hb, end: he, values, label, .. }, None) => {
-            let typed = number(value)?.to_radians().rem_euclid(std::f64::consts::TAU);
+            // Typed as the drawing shows angles (from ANGBASE, clockwise when ANGDIR is 1).
+            let typed = super::reference::angle_from_shown(d, number(value)?.to_radians());
             let a = allowed(values, typed);
             if !a.is_finite() {
                 return Err(format!("\"{value}\" is not an angle for {label}."));
