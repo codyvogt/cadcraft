@@ -167,6 +167,22 @@ fn a_rotation_grip_off_the_radius_stays_where_its_grip_object_is() {
 }
 
 #[test]
+fn an_angle_shows_and_is_typed_as_the_drawing_measures_angles() {
+    // Angles measured clockwise from north (ANGBASE 90°, ANGDIR 1): AutoCAD shows Angle1 0 as
+    // 90 and 0.5 rad as 61.35, and a typed angle is read the same way.
+    let (mut d, r) = symbol();
+    d.header.set_f64("ANGBASE", std::f64::consts::FRAC_PI_2);
+    d.header.set_i64("ANGDIR", 1);
+    assert!(props(&d, r).contains(&("Angle1".to_string(), "90".to_string())), "{:?}", props(&d, r));
+    // 60 shown is 30° counterclockwise: the grip turns from (102, 100) to there.
+    set_property(&mut d, r, "Angle1", "60").unwrap();
+    assert!(props(&d, r).contains(&("Angle1".to_string(), "60".to_string())), "{:?}", props(&d, r));
+    let at = grips(&d, r).into_iter().find(|g| g.shape == GripShape::Rotation).map(|g| g.at).unwrap();
+    let want = (100.0 + 2.0 * 30f64.to_radians().cos(), 100.0 + 2.0 * 30f64.to_radians().sin());
+    assert!(near(at, want), "{at:?} vs {want:?}");
+}
+
+#[test]
 fn bad_angles_and_states_change_nothing() {
     let (mut d, r) = symbol();
     let before = d.clone();
