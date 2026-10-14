@@ -18,7 +18,7 @@ use cadcraft_geom::{Mat3, Vec2, Vec3};
 
 use super::{ActionKind, DynamicBlock, ParameterKind, Value, dynamic_block, reference};
 use crate::foreign::{ForeignExtra, ForeignObject};
-use crate::{Block, Drawing, Entity, EntityKind, Handle, RawTag};
+use crate::{Block, Drawing, Entity, EntityKind, HAlign, Handle, RawTag, Text, VAlign};
 
 /// Xdata application naming a copied object's object in the dynamic block (its element tag).
 const ETAG: &str = "AcDbBlockRepETag";
@@ -112,6 +112,52 @@ fn rotation_end(b: Vec3, e: Vec3, home: (Vec3, Vec3), a: f64) -> Vec3 {
     let zero = (home.1 - home.0).xy();
     let dir = Vec2::new(zero.y.atan2(zero.x).cos(), zero.y.atan2(zero.x).sin()).rotate(a);
     b + (dir * r).to3(0.0)
+}
+
+/// Text `t` carried by `m`, kept readable as AutoCAD keeps it (MIRRTEXT 0). A transform that
+/// mirrors keeps the text's mirrored footprint: the text reads in whichever mirrored direction is
+/// nearer its own, and a footprint reversed along the text swaps left and right justification
+/// (AutoCAD moves the start back by the text's width instead, which draws the same), one reversed
+/// across it swaps top and bottom.
+fn carry_text(t: &mut Text, m: &Mat3) {
+    let u = Vec2::new(t.rotation.cos(), t.rotation.sin());
+    let mut k = EntityKind::Text(t.clone());
+    k.transform(m);
+    let EntityKind::Text(mut after) = k else { return };
+    let o = m.apply(Vec2::ZERO);
+    let (ex, ey, mu) = (m.apply(Vec2::new(1.0, 0.0)) - o, m.apply(Vec2::new(0.0, 1.0)) - o, m.apply(u) - o);
+    if ex.x * ey.y - ex.y * ey.x < 0.0 && mu.len() > 1e-12 {
+        // The point the text is placed by, before its justification changes.
+        let at = after.justify_point();
+        if mu.dot(u) >= 0.0 {
+            after.rotation = cadcraft_geom::norm_angle(mu.angle());
+            after.valign = match after.valign {
+                VAlign::Top => VAlign::Bottom,
+                VAlign::Bottom | VAlign::Baseline => VAlign::Top,
+                v => v,
+            };
+        } else {
+            after.rotation = cadcraft_geom::norm_angle((mu * -1.0).angle());
+            match after.halign {
+                HAlign::Left => after.halign = HAlign::Right,
+                HAlign::Right => after.halign = HAlign::Left,
+                // Placed by both points: they swap ends.
+                HAlign::Aligned | HAlign::Fit => {
+                    if let Some(a) = after.align_pt {
+                        after.align_pt = Some(after.insert);
+                        after.insert = a;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !matches!(after.halign, HAlign::Aligned | HAlign::Fit) {
+            let at = at.to3(after.insert.z);
+            after.insert = at;
+            after.align_pt = (!matches!((after.halign, after.valign), (HAlign::Left, VAlign::Baseline))).then_some(at);
+        }
+    }
+    *t = after;
 }
 
 /// A parameter's current value on the reference: the value it was given, else the block's own.
@@ -661,7 +707,12 @@ fn apply(
         for op in moves.get(&e.handle).into_iter().flatten() {
             match op {
                 Op::Move(idx, v) => move_entity(&mut c, idx.as_deref(), *v),
-                Op::Transform(t) => c.kind.transform(t),
+                // Text and attribute definitions keep reading as AutoCAD keeps them.
+                Op::Transform(t) => match &mut c.kind {
+                    EntityKind::Text(x) => carry_text(x, t),
+                    EntityKind::AttDef(a) if a.multiline.is_none() => carry_text(&mut a.text, t),
+                    k => k.transform(t),
+                },
             }
         }
         if let EntityKind::Hatch(h) = &mut c.kind {
@@ -709,11 +760,7 @@ fn apply(
             for a in &mut i.attribs {
                 if let Some(t) = attrib_moves.get(&a.tag.to_ascii_uppercase()) {
                     let w = to_block.then(*t).then(to_world);
-                    let mut k = EntityKind::Text(a.text.clone());
-                    k.transform(&w);
-                    if let EntityKind::Text(t) = k {
-                        a.text = t;
-                    }
+                    carry_text(&mut a.text, &w);
                     a.transform_multiline(&w);
                 }
             }
