@@ -208,6 +208,22 @@ fn an_angle_by_increments_marks_its_stops_round_the_circle() {
 }
 
 #[test]
+fn an_angle_s_stops_follow_a_grip_off_the_radius() {
+    // The grip object a quarter turn round and 90° increments: each stop is where the grip is
+    // at that angle, the first (0) where it is now.
+    let src = include_str!("data/dynblock_symbol.txt")
+        .replace("\r\n", "\n")
+        .replace("96 3\n141 0\n142 6.283185307179586\n143 0\n", "96 7\n141 0\n142 6.283185307179586\n143 1.5707963267948966\n")
+        .replace("100 AcDbBlockGrip\n91 0\n92 0\n1010 2\n1020 0\n", "100 AcDbBlockGrip\n91 0\n92 0\n1010 0\n1020 2\n");
+    let (d, r) = symbol_from(&src);
+    let at: Vec<Vec2> = grip_stops(&d, r, 15, GripPart::End).into_iter().map(|(p, _)| p).collect();
+    assert_eq!(at.len(), 4, "{at:?}");
+    for (p, want) in at.iter().zip([(100.0, 102.0), (98.0, 100.0), (100.0, 98.0), (102.0, 100.0)]) {
+        assert!(near(*p, want), "{p:?} vs {want:?}");
+    }
+}
+
+#[test]
 fn bad_angles_and_states_change_nothing() {
     let (mut d, r) = symbol();
     let before = d.clone();
