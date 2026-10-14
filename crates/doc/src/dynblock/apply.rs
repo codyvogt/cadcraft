@@ -529,15 +529,26 @@ pub fn grip_stops(d: &Drawing, insert: Handle, node: i32, part: super::GripPart)
                 .collect()
         }
         // A full turn is where no turn is.
-        (ParameterKind::Rotation { base: hb, end: he, values, .. }, GripPart::End) => stops(values, std::f64::consts::TAU)
-            .into_iter()
-            .filter(|a| *a < std::f64::consts::TAU - 1e-9)
-            .map(|a| {
-                let at = rotation_end(b, e, (*hb, *he), a);
-                let radial = (at - b).xy();
-                (at, radial.perp().to3(0.0))
-            })
-            .collect(),
+        // Where the grip is at each angle: its grip object can be off the radius' end, by an
+        // angle and at a distance of its own.
+        (ParameterKind::Rotation { base: hb, end: he, values, .. }, GripPart::End) => {
+            let g = p.grips.get(1).and_then(|id| m.grip_points.iter().find(|(gi, _)| gi == id)).map(|(_, g)| *g);
+            let home = (*he - *hb).len();
+            let (offset, reach) = match g {
+                Some(g) if home > 1e-12 && (g - *hb).len() > 1e-12 => (rotation_angle(*hb, g, (*hb, *he)), (g - *hb).len() * len / home),
+                _ => (0.0, len),
+            };
+            let reach_end = b + u * reach;
+            stops(values, std::f64::consts::TAU)
+                .into_iter()
+                .filter(|a| *a < std::f64::consts::TAU - 1e-9)
+                .map(|a| {
+                    let at = rotation_end(b, reach_end, (*hb, *he), a + offset);
+                    let radial = (at - b).xy();
+                    (at, radial.perp().to3(0.0))
+                })
+                .collect()
+        }
         _ => Vec::new(),
     };
     let base = d.block(&r.definition).map(|b| b.base.xy()).unwrap_or_default();
