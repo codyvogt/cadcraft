@@ -108,6 +108,15 @@ fn ends_used(m: &DynamicBlock, node: i32) -> Option<(bool, bool)> {
     used
 }
 
+/// Where a grip object at `g` (from its parameter's base, in the dynamic block) is when the
+/// parameter's line `home` (base to end, in the block) is now `now` from `base`: kept along and
+/// across the line as it turns, moves or stretches. `home` and `now` aren't zero.
+fn carried(g: Vec2, home: Vec2, base: Vec2, now: Vec2) -> Vec2 {
+    let (u0, u) = (home * (1.0 / home.len()), now * (1.0 / now.len()));
+    let (along, across) = (g.dot(u0) / home.len(), u0.x * g.y - u0.y * g.x);
+    base + now * along + u.perp() * across
+}
+
 fn point<S: serde::Serializer>(p: &Vec2, s: S) -> Result<S::Ok, S::Error> {
     [p.x, p.y].serialize(s)
 }
@@ -178,15 +187,21 @@ pub fn grips(d: &Drawing, insert: Handle) -> Vec<DynGrip> {
                     }
                 }
             }
-            ParameterKind::Rotation { base, end, label, .. } => {
+            ParameterKind::Rotation { base: hb, end: he, label, .. } => {
                 let (b, e) = match r.values.get(&p.node) {
                     Some(Value::Points { base, end }) => (*base, *end),
-                    _ => (*base, *end),
+                    _ => (*hb, *he),
                 };
-                if shown(p.node, grip(1)) {
-                    let u = e - b;
+                let id = grip(1);
+                let (home, now) = ((*he - *hb).xy(), (e - b).xy());
+                if shown(p.node, id) && home.len() > 1e-12 && now.len() > 1e-12 {
+                    // The grip object's place (AutoCAD draws the circle there, not at the radius'
+                    // end), turned and moved with the radius.
+                    let at = carried(points.get(&id).copied().unwrap_or(*he).xy() - hb.xy(), home, b.xy(), now);
+                    let at = Vec3::new(at.x, at.y, b.z);
+                    let u = at - b;
                     let u = if u.len() > 1e-12 { u * (1.0 / u.len()) } else { Vec3::new(1.0, 0.0, 0.0) };
-                    let (at, dir) = (world(e), toward(e, u));
+                    let (at, dir) = (world(at), toward(at, u));
                     out.push(DynGrip {
                         node: p.node,
                         part: GripPart::End,
@@ -209,9 +224,8 @@ pub fn grips(d: &Drawing, insert: Handle) -> Vec<DynGrip> {
                     // The grip object's place, kept along and across the reflection line as the
                     // line turns or moves with other actions.
                     let g = points.get(&id).copied().unwrap_or(*hb).xy() - hb.xy();
-                    let (u0, u) = (home * (1.0 / home.len()), now * (1.0 / now.len()));
-                    let (along, across) = (g.dot(u0) / home.len(), u0.x * g.y - u0.y * g.x);
-                    let at = b.xy() + now * along + u.perp() * across;
+                    let at = carried(g, home, b.xy(), now);
+                    let u = now * (1.0 / now.len());
                     let across_dir = if flipped { -u.perp() } else { u.perp() };
                     let (at3, dir) = (Vec3::new(at.x, at.y, b.z), toward(Vec3::new(at.x, at.y, b.z), across_dir.to3(0.0)));
                     out.push(DynGrip {
