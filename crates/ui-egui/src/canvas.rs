@@ -79,6 +79,8 @@ pub struct CanvasState {
     /// The selection and hover highlights inside the active MSPACE viewport (see [`VpHighlight`]).
     vp_sel: VpHighlight,
     vp_hover: VpHighlight,
+    /// Selected annotative objects at their other scales (see [`AnnoOthers`]).
+    anno_others: AnnoOthers,
     /// Model space seen through the active MSPACE viewport (see [`VpContent`]).
     vp: VpContent,
     /// Indices of infinite-line primitives in `list` (drawn on the CPU in GPU mode).
@@ -663,6 +665,49 @@ impl VpHighlight {
             self.key = Some(key);
             self.list_gen = self.list_gen.wrapping_add(1);
         }
+    }
+}
+
+/// The selected annotative objects at their other scales (SELECTIONANNODISPLAY), tessellated in
+/// model units from [`cadcraft_engine::Session::selection_anno_others`]; rebuilt only when the
+/// drawing, the selection, the setting, the active viewport or the zoom band change.
+#[derive(Default)]
+struct AnnoOthers {
+    key: Option<u64>,
+    list: DisplayList,
+}
+
+impl AnnoOthers {
+    fn update(&mut self, session: &cadcraft_engine::Session, sel: &[Handle], scale: f64) -> &DisplayList {
+        let tolerance = viewport_highlight_tolerance(scale);
+        let key = session.state().ok().map(|st| {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            let on = session.settings.selectionannodisplay;
+            (st.uid, st.revision, std::sync::Arc::as_ptr(&st.doc) as usize, tolerance.to_bits(), sel, on, st.mspace).hash(&mut h);
+            h.finish()
+        });
+        if self.key != key {
+            let others = session.selection_anno_others();
+            self.list = match session.state() {
+                Ok(st) if !others.is_empty() => {
+                    cadcraft_render::build_entities(&st.doc, others.iter(), &cadcraft_render::Options { tolerance, ..Default::default() })
+                }
+                _ => DisplayList::default(),
+            };
+            self.key = key;
+        }
+        &self.list
+    }
+}
+
+/// Draw the selected annotative objects' other scales faded (SELECTIONANNODISPLAY), under the
+/// selection highlight; `xf` maps model units to the screen.
+fn draw_anno_others(others: &mut AnnoOthers, session: &cadcraft_engine::Session, p: &egui::Painter, xf: &Xf, sel: &[Handle], look: Look) {
+    let list = others.update(session, sel, xf.scale);
+    if !list.prims.is_empty() {
+        let all: Vec<usize> = (0..list.prims.len()).collect();
+        draw_highlight(p, xf, list, &all, Tokens::get().selection_faded, Look { width: 1.0, ..look });
     }
 }
 
@@ -1842,6 +1887,7 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
             if let Some(look) = selection_look
                 && !sel.is_empty()
             {
+                draw_anno_others(&mut c.anno_others, &app.session, &clipped, &xf, &sel, look);
                 c.vp_sel.update(st, &sel, scale);
                 let list = &c.vp_sel.list;
                 let all = || (0..list.prims.len()).collect::<Vec<_>>();
@@ -1858,13 +1904,18 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
                 }
             }
         }
-    } else if let CanvasState { list: Some(list), list_gen, prim_index, hover, gpu, hl_key, hl_slot, hl_origin, hl_infinite, .. } = &mut app.canvas {
+    } else if let CanvasState { list: Some(list), list_gen, prim_index, hover, gpu, hl_key, hl_slot, hl_origin, hl_infinite, anno_others, .. } =
+        &mut app.canvas
+    {
         if let Some(h) = *hover
             && !sel.contains(&h)
         {
             draw_highlight(&painter, &xf, list, &prim_index.prims(*list_gen, list, &[h]), t.hover, preview_look);
         }
         if let Some(look) = selection_look {
+            if !sel.is_empty() {
+                draw_anno_others(anno_others, &app.session, &painter, &xf, &sel, look);
+            }
             if gpu.is_some() && !sel.is_empty() {
                 let list_id = *list_gen;
                 let hl = (hl_key, &*hl_slot, hl_origin, &mut *hl_infinite);
