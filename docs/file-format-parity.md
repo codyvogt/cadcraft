@@ -139,6 +139,7 @@ our output in AutoCAD black-box.
 | Date | Change | Summary |
 |---|---|---|
 | 2026-10-17 | minor | DWG read: DGN line style components no line style definition reaches are left out before the DXF bridge, with a read note; an 83 MB site plan with 888,483 of them (1.2 GB of DXF, over the limit) now opens (#1482) |
+| 2026-10-15 | minor | The current annotation scale is read from and written to AutoCAD's variable dictionary (`AcDbVariableDictionary` CANNOSCALE), so a drawing opens at its scale in either program |
 | 2026-10-15 | minor | Annotative multileaders read and write AutoCAD's annotation scale contexts (each context the multileader's `CONTEXT_DATA` at its scale), DXF and DWG |
 | 2026-10-15 | minor | Annotative text, MText and dimensions read and write AutoCAD's annotation scale contexts (DXF and DWG 2007 and later): written at their default scale with a context per scale, a dimension with a `*D` block per scale; read back at paper size. Before, AutoCAD's were dropped (the objects read as not annotative) and CADCraft's kept only in its own record |
 | 2026-10-12 | minor | PDF output: object transparency plotted as PDF alpha (`/ExtGState` `/ca` `/CA`) when the page setup's or the plot's "Plot transparency" is on; PNG plots blend it, SVG uses `opacity`; plots without it are unchanged byte for byte |

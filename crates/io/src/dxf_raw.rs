@@ -1024,6 +1024,23 @@ fn reconcile(
     out
 }
 
+/// AutoCAD's current annotation scale, kept with its variable dictionary (the named object
+/// dictionary's `AcDbVariableDictionary`, a DICTIONARYVAR `CANNOSCALE` with the scale's name in
+/// group 1), brought up to date with the drawing's: AutoCAD opens the drawing at that scale.
+/// `None` when the file had none.
+fn current_scale(f: &Foreign, d: &Drawing) -> Option<(String, ForeignObject)> {
+    let vars = f.dictionary.iter().find(|(k, _)| k.trim().eq_ignore_ascii_case("AcDbVariableDictionary"))?.1;
+    let object = |h: &str| f.objects.iter().find(|o| o.handle.hex() == norm(h));
+    let dict = object(&vars.hex())?;
+    let at = dict.tags.iter().position(|t| t.code == 3 && t.value.trim().eq_ignore_ascii_case("CANNOSCALE"))?;
+    let var = dict.tags.get(at + 1).filter(|t| matches!(t.code, 350 | 360))?;
+    let mut o = object(&var.value)?.clone();
+    let name = d.header.str("CANNOSCALE", "1:1");
+    let value = o.tags.iter_mut().find(|t| t.code == 1)?;
+    value.value = name;
+    Some((o.handle.hex(), o))
+}
+
 /// Drop an extension dictionary's modelled entries (key and handle) from its groups (`of_insert`:
 /// it is a block reference's).
 fn strip_entries(tags: &mut Vec<RawTag>, of_insert: bool) {
@@ -1326,6 +1343,7 @@ pub(crate) fn finish(tags: &mut Vec<Tag>, d: &Drawing) {
     let mut contexts = block_contexts(f, d, &owners);
     let attribute = attribute_contexts(f, d, &owners, &contexts);
     contexts.extend(attribute);
+    contexts.extend(current_scale(f, d));
     // In line with the drawing's scales and each reference's.
     let rec = reconcile(f, d, &owners, &roles, &mut contexts, seed(tags).max(max_handle(tags)));
     let all: Vec<&ForeignObject> = f.objects.iter().chain(&rec.added).collect();
