@@ -151,6 +151,15 @@ impl Ctx {
     fn at_default(&self, e: &Entity) -> Option<Entity> {
         self.anno.objs.get(&e.handle).map(|o| crate::dxf_anno::at_scale(e, crate::dxf_anno::default_factor(o)))
     }
+    /// A native MULTILEADER's groups after its `AcDbMLeader` marker.
+    fn mleader_tags(&self, d: &Drawing, m: &MLeader) -> Vec<Tag> {
+        let refs = crate::dxf_mleader::Refs {
+            style: self.mleader_style(&m.style),
+            text_style: m.text.as_ref().and_then(|t| self.style(&t.style)),
+            block: m.block.as_ref().and_then(|b| self.block_records.get(&b.block.to_ascii_uppercase()).cloned()),
+        };
+        crate::dxf_mleader::entity_tags(d, m, &refs)
+    }
     /// `AcadAnnotative` xdata of an object written with contexts.
     fn anno_xdata(&self, w: &mut W, e: &Entity) {
         if self.anno.objs.contains_key(&e.handle) {
@@ -1074,14 +1083,19 @@ fn entity(w: &mut W, d: &Drawing, e: &Entity, owner: &str, paper: bool, cx: &Ctx
         }
         EntityKind::MLeader(m) if !cx.native_mleader() => mleader_fallback(w, d, e, m, owner, paper, cx),
         EntityKind::MLeader(m) => {
+            let scaled = cx.at_default(e);
+            let m = match scaled.as_ref().map(|s| &s.kind) {
+                Some(EntityKind::MLeader(s)) => s,
+                _ => m,
+            };
             w.s(0, "MULTILEADER");
             common(w, e, owner, paper, "AcDbMLeader");
-            let refs = crate::dxf_mleader::Refs {
-                style: cx.mleader_style(&m.style),
-                text_style: m.text.as_ref().and_then(|t| cx.style(&t.style)),
-                block: m.block.as_ref().and_then(|b| cx.block_records.get(&b.block.to_ascii_uppercase()).cloned()),
-            };
-            w.t.extend(crate::dxf_mleader::entity_tags(d, m, &refs));
+            let mut tags = cx.mleader_tags(d, m);
+            if let Some(o) = cx.anno.objs.get(&e.handle) {
+                crate::dxf_anno::mleader_at(&mut tags, crate::dxf_anno::default_factor(o));
+            }
+            w.t.extend(tags);
+            cx.anno_xdata(w, e);
         }
         EntityKind::Leader(l) => {
             w.s(0, "LEADER");
@@ -2627,7 +2641,7 @@ fn tags_for(d: &Drawing, version: Version, target: Version) -> Vec<Tag> {
     annos.sort_by_key(|(h, _)| **h);
     for (h, o) in annos {
         if let Some(e) = d.entity(*h) {
-            w.t.extend(crate::dxf_anno::objects(d, e, o));
+            w.t.extend(crate::dxf_anno::objects(d, e, o, &|m| cx.mleader_tags(d, m)));
         }
     }
     w.s(0, "DICTIONARY");
