@@ -75,7 +75,7 @@ on read with a note, so such files no longer exceed the DXF limit (#1482). **DWG
 |---|---|---|---|
 | LINE, POINT, CIRCLE, ARC, ELLIPSE, LWPOLYLINE (widths, bulges, elevation), SPLINE, RAY, XLINE | yes | yes | round-trip tests |
 | POLYLINE 2D/3D | yes | yes (as LWPOLYLINE / 3D POLYLINE) | polyface and polygon meshes flattened: lossy |
-| TEXT, MTEXT, ATTDEF, INSERT + ATTRIB | yes; multiline attributes (embedded MTEXT) read and drawn; annotative text and MText from their annotation scale contexts | yes; multiline attributes written as embedded MTEXT (DXF 2007 and later; older versions: one line); annotative text and MText with `AcadAnnotative` and a context per scale (2007 and later) | ATTDEF prompt kept (#137); a context's own position at one scale (ANNORESET) is not modelled |
+| TEXT, MTEXT, ATTDEF, INSERT + ATTRIB | yes; multiline attributes (embedded MTEXT) read and drawn; annotative text and MText from their annotation scale contexts | yes; multiline attributes written as embedded MTEXT (DXF 2007 and later; older versions: one line); annotative text and MText with `AcadAnnotative` and a context per scale (2007 and later) | ATTDEF prompt kept (#137); a context's own position at one scale is read and written as the object's offset there |
 | DIMENSION (all 7 kinds) | yes; annotative ones from their scale contexts | yes, with anonymous `*D` blocks; an annotative dimension gets a context and a `*D` block per scale | a reopened dimension's `*D` block is regenerated under its name, unreferenced ones dropped (#495); DIMASSOC objects written |
 | LEADER | yes | yes | |
 | MULTILEADER | yes (#459) | yes, native MULTILEADER with MLEADERSTYLE (#459) | several landings per multileader are folded into one; per-object overrides not kept; annotative ones keep their scales as AutoCAD's scale contexts (2007 and later) |
@@ -139,6 +139,7 @@ our output in AutoCAD black-box.
 | Date | Change | Summary |
 |---|---|---|
 | 2026-10-17 | minor | DWG read: DGN line style components no line style definition reaches are left out before the DXF bridge, with a read note; an 83 MB site plan with 888,483 of them (1.2 GB of DXF, over the limit) now opens (#1482) |
+| 2026-10-15 | minor | Annotative text, MText, dimensions and multileaders keep a context's own position at its scale (read as the object's offset there, written back) |
 | 2026-10-15 | minor | The current annotation scale is read from and written to AutoCAD's variable dictionary (`AcDbVariableDictionary` CANNOSCALE), so a drawing opens at its scale in either program |
 | 2026-10-15 | minor | Annotative multileaders read and write AutoCAD's annotation scale contexts (each context the multileader's `CONTEXT_DATA` at its scale), DXF and DWG |
 | 2026-10-15 | minor | Annotative text, MText and dimensions read and write AutoCAD's annotation scale contexts (DXF and DWG 2007 and later): written at their default scale with a context per scale, a dimension with a `*D` block per scale; read back at paper size. Before, AutoCAD's were dropped (the objects read as not annotative) and CADCraft's kept only in its own record |
