@@ -29,6 +29,7 @@ const SET_KEYS: &[&str] = &[
     "transparency",
     "visible",
     "annotative",
+    "annoScales",
     "dimStyle",
     "textOverride",
     "textRotation",
@@ -220,6 +221,24 @@ pub(super) fn run_set(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let prep = Prepared::new(d, p, &hs);
     let anno_scale = d.current_anno_scale();
+    // annoScales: the exact scales an annotative object supports (names of the scale list, each
+    // once; at least one).
+    let anno_scales: Option<Vec<cadcraft_doc::AnnoScale>> = match p.get("annoScales") {
+        None | Some(Value::Null) => None,
+        Some(v) => {
+            let mut list: Vec<cadcraft_doc::AnnoScale> = Vec::new();
+            for n in crate::cmd::annoscale::scale_names("properties.set", Some(v))? {
+                let sc = d.anno_scale(&n).cloned().ok_or_else(|| bad("properties.set", format!("`{n}` is not in the scale list")))?;
+                if !list.iter().any(|x| x.name.eq_ignore_ascii_case(&sc.name)) {
+                    list.push(sc);
+                }
+            }
+            if list.is_empty() {
+                return Err(bad("properties.set", "an annotative object keeps at least one scale"));
+            }
+            Some(list)
+        }
+    };
     let mut used: BTreeSet<&str> = BTreeSet::new();
     for h in &hs {
         let h = *h;
@@ -233,6 +252,15 @@ pub(super) fn run_set(s: &mut Session, p: &Value) -> Result<Value> {
                     dm.block = None;
                 }
                 used.insert("annotative");
+            }
+            if let Some(list) = &anno_scales
+                && cadcraft_doc::can_be_annotative(&e.kind)
+            {
+                e.common.anno_scales.clone_from(list);
+                if let EntityKind::Dimension(dm) = &mut e.kind {
+                    dm.block = None;
+                }
+                used.insert("annoScales");
             }
             if let Some(l) = str_param(p, "layer") {
                 e.common.layer = l.to_string();
