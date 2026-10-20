@@ -684,7 +684,9 @@ impl AnnoOthers {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
             let on = session.settings.selectionannodisplay;
-            (st.uid, st.revision, std::sync::Arc::as_ptr(&st.doc) as usize, tolerance.to_bits(), sel, on, st.mspace).hash(&mut h);
+            // An unlocked viewport's zoom changes its scale without a new revision.
+            let vp_scale = st.anno_view().map(f64::to_bits);
+            (st.uid, st.revision, std::sync::Arc::as_ptr(&st.doc) as usize, tolerance.to_bits(), sel, on, st.mspace, vp_scale).hash(&mut h);
             h.finish()
         });
         if self.key != key {
@@ -2725,6 +2727,33 @@ pub(crate) mod tests {
 
     fn hs(v: &[u64]) -> Vec<Handle> {
         v.iter().map(|&h| Handle(h)).collect()
+    }
+
+    /// Zooming an unlocked viewport (no new revision) changes its scale: the faded other scales
+    /// of the selection are built again.
+    #[test]
+    fn anno_others_follow_a_viewport_zoom() {
+        use serde_json::json;
+        let mut s = cadcraft_engine::Session::new();
+        s.execute("style", &json!({ "name": "Notes", "annotative": true, "current": true })).unwrap();
+        let r = s.execute("text", &json!({ "at": [0, 0], "text": "NOTE", "height": 0.25 })).unwrap();
+        let h = r["handle"].as_str().unwrap().to_string();
+        s.execute("objectscale", &json!({ "handles": [h], "add": "1:50" })).unwrap();
+        s.execute("layout.set", &json!({ "name": "Layout1" })).unwrap();
+        let vp = s.execute("mview", &json!({ "p1": [0, 0], "p2": [200, 100] })).unwrap();
+        let vh = vp["viewports"][0].as_str().unwrap().to_string();
+        s.execute("viewport.set", &json!({ "handle": vh, "scale": "1:50", "center": [0, 0] })).unwrap();
+        s.execute("mspace", &json!({ "handle": vh })).unwrap();
+        s.execute("select", &json!({ "handles": [h] })).unwrap();
+        let sel = s.selection();
+        let mut others = AnnoOthers::default();
+        others.update(&s, &sel, 1.0);
+        let before = others.key;
+        let v = s.state().unwrap().view();
+        s.state_mut().unwrap().set_view_quiet(cadcraft_engine::View { height: v.height / 50.0, ..v });
+        assert!((s.anno_view().unwrap() - 1.0).abs() < 1e-9, "{:?}", s.anno_view());
+        others.update(&s, &sel, 1.0);
+        assert_ne!(others.key, before);
     }
 
     /// A dragged object keeps its transparency in the GPU preview when TRANSPARENCYDISPLAY is
