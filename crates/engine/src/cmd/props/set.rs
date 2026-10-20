@@ -253,8 +253,10 @@ pub(super) fn run_set(s: &mut Session, p: &Value) -> Result<Value> {
                 }
                 used.insert("annotative");
             }
+            // The scales of an annotative object (one made annotative just above included): a
+            // plain object stays plain, as `annotative: false` leaves it.
             if let Some(list) = &anno_scales
-                && cadcraft_doc::can_be_annotative(&e.kind)
+                && cadcraft_doc::is_annotative(e)
             {
                 e.common.anno_scales.clone_from(list);
                 if let EntityKind::Dimension(dm) = &mut e.kind {
