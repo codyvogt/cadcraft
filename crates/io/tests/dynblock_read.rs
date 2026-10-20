@@ -604,4 +604,13 @@ fn a_stretch_moves_a_multiline_attributes_text() {
     let a = &i.attribs[0];
     assert_eq!(a.text.insert.x, 129.0);
     assert_eq!(a.multiline.as_ref().unwrap().mtext.insert.x, 129.0);
+    // Saved (in the drawing's version, 2018: R2000 DXF has no multiline attributes) and reopened:
+    // the moved attribute and its multiline text stay where they went.
+    let again = cadcraft_io::read(&cadcraft_io::write(&d, "door.dxf").unwrap(), "door.dxf").unwrap();
+    let Some(cadcraft_doc::EntityKind::Insert(i)) = again.entity(r).map(|e| &e.kind) else { panic!("no reference after reopening") };
+    let a = &i.attribs[0];
+    assert_eq!((a.text.insert.x, a.text.insert.y), (129.0, 0.0));
+    let m = &a.multiline.as_ref().expect("still multiline").mtext;
+    assert_eq!((m.insert.x, m.insert.y), (129.0, 0.0));
+    assert_eq!(m.contents, r"SITE\PNAME");
 }
