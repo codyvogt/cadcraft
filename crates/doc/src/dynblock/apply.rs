@@ -172,12 +172,14 @@ fn current(m: &DynamicBlock, values: &BTreeMap<i32, Value>, node: i32) -> Option
         (ParameterKind::Flip { base, end, .. }, None) => Val::Flip(*base, *end, false),
         (ParameterKind::Visibility { states, .. }, None) => Val::Text(states.first().map(|s| s.name.clone()).unwrap_or_default()),
         (ParameterKind::Point { at, .. }, None) => Val::Point(*at),
+        // The block has it at its base point.
+        (ParameterKind::BasePoint { .. }, None) => Val::Point(m.base),
         (
             ParameterKind::Linear { base, end, .. }
             | ParameterKind::Polar { base, end, .. }
             | ParameterKind::Xy { base, end, .. }
             | ParameterKind::Rotation { base, end, .. }
-            | ParameterKind::Alignment { base, end },
+            | ParameterKind::Alignment { base, end, .. },
             None,
         ) => Val::Points(*base, *end),
         _ => return None,
@@ -205,16 +207,26 @@ fn allowed(set: &super::ValueSet, v: f64) -> f64 {
 }
 
 /// A linear parameter's points for distance `dist`: the end point moves along the parameter, or
-/// both points move apart from the midpoint.
-fn linear_points(base: Vec3, end: Vec3, dist: f64, from_midpoint: bool) -> (Vec3, Vec3) {
-    let dir = end - base;
-    let len = dir.len();
-    let u = if len > 1e-12 { dir * (1.0 / len) } else { Vec3::new(1.0, 0.0, 0.0) };
+/// both points move apart from the midpoint. At a distance of 0 the parameter goes the way `home`
+/// (its base to its end in the dynamic block) does.
+fn linear_points(base: Vec3, end: Vec3, dist: f64, from_midpoint: bool, home: Vec3) -> (Vec3, Vec3) {
+    let u = unit_along(end - base, home);
     if from_midpoint {
         let mid = (base + end) * 0.5;
         (mid - u * (dist / 2.0), mid + u * (dist / 2.0))
     } else {
         (base, base + u * dist)
+    }
+}
+
+/// `dir` as a unit vector, else `home`'s (a distance of 0 has no direction of its own), else X.
+fn unit_along(dir: Vec3, home: Vec3) -> Vec3 {
+    if dir.len() > 1e-12 {
+        dir * (1.0 / dir.len())
+    } else if home.len() > 1e-12 {
+        home * (1.0 / home.len())
+    } else {
+        Vec3::new(1.0, 0.0, 0.0)
     }
 }
 
@@ -225,26 +237,49 @@ struct Plan {
 }
 
 impl Plan {
-    /// Set the value a lookup table cell gives property `property` of parameter `node`.
+    /// Set the value a lookup table cell gives property `property` of parameter `node` (block
+    /// units; angles in radians, as AutoCAD writes them).
     fn cell(&mut self, m: &DynamicBlock, values: &BTreeMap<i32, Value>, node: i32, property: &str, cell: &str) -> Result<(), String> {
         let p = m.parameters.iter().find(|p| p.node == node).ok_or("A lookup table refers to a missing parameter.")?;
-        match (&p.kind, property.to_ascii_lowercase().as_str()) {
-            (_, "lookupstring") | (ParameterKind::Visibility { .. }, "visibilitystate") => {
-                self.set.insert(node, Val::Text(cell.to_string()));
-            }
-            (ParameterKind::Linear { from_midpoint, .. }, "updateddistance" | "distance") => {
-                let dist = cell
-                    .trim()
-                    .parse::<f64>()
-                    .ok()
-                    .filter(|v| v.is_finite())
-                    .ok_or_else(|| format!("A lookup table gives \"{cell}\" for a distance."))?;
-                let Some(Val::Points(b, e)) = self.set.get(&node).cloned().or_else(|| current(m, values, node)) else { return Ok(()) };
-                let (b2, e2) = linear_points(b, e, dist, *from_midpoint);
-                self.set.insert(node, Val::Points(b2, e2));
-            }
-            (_, other) => return Err(format!("A lookup table sets {other}, which CADCraft can't change yet.")),
+        let col = column(&p.kind, property).ok_or_else(|| format!("A lookup table sets {property}, which CADCraft can't change yet."))?;
+        if col == Column::Text {
+            self.set.insert(node, Val::Text(cell.to_string()));
+            return Ok(());
         }
+        let v =
+            cell.trim().parse::<f64>().ok().filter(|v| v.is_finite()).ok_or_else(|| format!("A lookup table gives \"{cell}\" for {property}."))?;
+        let Some(cur) = self.set.get(&node).cloned().or_else(|| current(m, values, node)) else { return Ok(()) };
+        // A polar parameter's direction (along X when it has none).
+        let along = |b: Vec3, e: Vec3| {
+            let d = (e - b).xy();
+            if d.len() > 1e-12 { d * (1.0 / d.len()) } else { Vec2::new(1.0, 0.0) }
+        };
+        let now = match (col, &p.kind, cur) {
+            (Column::Distance, ParameterKind::Linear { from_midpoint, base: hb, end: he, .. }, Val::Points(b, e)) => {
+                let (b2, e2) = linear_points(b, e, v, *from_midpoint, *he - *hb);
+                Val::Points(b2, e2)
+            }
+            (Column::Distance, ParameterKind::Polar { .. }, Val::Points(b, e)) => Val::Points(b, b + (along(b, e) * v).to3(0.0)),
+            (Column::Angle, ParameterKind::Rotation { base: hb, end: he, .. }, Val::Points(b, e)) => {
+                Val::Points(b, rotation_end(b, e, (*hb, *he), v))
+            }
+            (Column::Angle, ParameterKind::Polar { .. }, Val::Points(b, e)) => {
+                Val::Points(b, b + (Vec2::new(v.cos(), v.sin()) * (e - b).xy().len()).to3(0.0))
+            }
+            (Column::DistanceX, ParameterKind::Xy { .. }, Val::Points(b, e)) => Val::Points(b, Vec3::new(b.x + v, e.y, e.z)),
+            (Column::DistanceY, ParameterKind::Xy { .. }, Val::Points(b, e)) => Val::Points(b, Vec3::new(e.x, b.y + v, e.z)),
+            (Column::X, ParameterKind::Point { .. }, Val::Point(at)) => Val::Point(Vec3::new(m.base.x + v, at.y, at.z)),
+            (Column::Y, ParameterKind::Point { .. }, Val::Point(at)) => Val::Point(Vec3::new(at.x, m.base.y + v, at.z)),
+            // Its flip grip's record follows.
+            (Column::Flip, ParameterKind::Flip { .. }, Val::Flip(b, e, _)) => {
+                if let Some(g) = p.grips.first().filter(|g| **g != 0) {
+                    self.set.insert(*g, Val::State(v != 0.0));
+                }
+                Val::Flip(b, e, v != 0.0)
+            }
+            _ => return Ok(()),
+        };
+        self.set.insert(node, now);
         Ok(())
     }
 
@@ -267,21 +302,17 @@ impl Plan {
         Ok(found)
     }
 
-    /// After input property `property` of parameter `node` changed: a lookup table with that input
-    /// whose inputs (with the new value) match a row gives its lookup value, and the lookup's
-    /// other tables then set their inputs for that value (as AutoCAD does).
-    fn chain(&mut self, m: &DynamicBlock, values: &BTreeMap<i32, Value>, node: i32, property: &str) -> Result<(), String> {
+    /// After parameter `node` changed: a lookup table with it as an input whose inputs (with the
+    /// new values) match a row gives its lookup value, and the lookup's other tables then set
+    /// their inputs for that value (as AutoCAD does).
+    fn chain(&mut self, m: &DynamicBlock, values: &BTreeMap<i32, Value>, node: i32) -> Result<(), String> {
         let read = |plan: &Plan, n: i32, prop: &str| -> Option<String> {
             let v = plan.set.get(&n).cloned().or_else(|| current(m, values, n))?;
-            match (v, prop.to_ascii_lowercase().as_str()) {
-                (Val::Text(t), "visibilitystate" | "lookupstring") => Some(t),
-                (Val::Points(b, e), "updateddistance" | "distance") => Some(format!("{}", (e - b).len())),
-                _ => None,
-            }
+            column_text(m, n, prop, &v)
         };
         for (i, a) in m.actions.iter().enumerate() {
             let ActionKind::Lookup { columns, rows } = &a.kind else { continue };
-            if !columns.iter().any(|c| !c.lookup && c.node == node && c.property.eq_ignore_ascii_case(property)) {
+            if !columns.iter().any(|c| !c.lookup && c.node == node) {
                 continue;
             }
             let Some(out) = columns.iter().position(|c| c.lookup) else { continue };
@@ -299,6 +330,68 @@ impl Plan {
         }
         Ok(())
     }
+}
+
+/// What a lookup table column stands for: a text (visibility state, lookup value), a distance, an
+/// angle (radians), an XY parameter's horizontal or vertical distance, a position's X or Y (from
+/// the block's base point) or a flip state (0 or 1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Column {
+    Text,
+    Distance,
+    Angle,
+    DistanceX,
+    DistanceY,
+    X,
+    Y,
+    Flip,
+}
+
+/// The column a lookup table property (as AutoCAD names them) is for a parameter of `kind`, when
+/// CADCraft can set and read it.
+pub(super) fn column(kind: &ParameterKind, property: &str) -> Option<Column> {
+    Some(match (kind, property.to_ascii_lowercase().as_str()) {
+        (ParameterKind::Lookup { .. }, "lookupstring") | (ParameterKind::Visibility { .. }, "visibilitystate") => Column::Text,
+        (ParameterKind::Linear { .. } | ParameterKind::Polar { .. }, "updateddistance" | "distance") => Column::Distance,
+        (ParameterKind::Rotation { .. } | ParameterKind::Polar { .. }, "updatedangle") => Column::Angle,
+        (ParameterKind::Xy { .. }, "updateddistancex") => Column::DistanceX,
+        (ParameterKind::Xy { .. }, "updateddistancey") => Column::DistanceY,
+        (ParameterKind::Point { .. }, "updatedx") => Column::X,
+        (ParameterKind::Point { .. }, "updatedy") => Column::Y,
+        (ParameterKind::Flip { .. }, "updatedflip") => Column::Flip,
+        _ => return None,
+    })
+}
+
+/// Property `property` of parameter `node` with value `v`, as a lookup table cell writes it.
+fn column_text(m: &DynamicBlock, node: i32, property: &str, v: &Val) -> Option<String> {
+    let p = m.parameters.iter().find(|p| p.node == node)?;
+    // From 0 to 2π, a full turn being none.
+    let angle = |a: f64| {
+        let a = a.rem_euclid(std::f64::consts::TAU);
+        if std::f64::consts::TAU - a < 1e-9 { 0.0 } else { a }
+    };
+    let out = match (column(&p.kind, property)?, &p.kind, v) {
+        (Column::Text, _, Val::Text(t)) => t.clone(),
+        (Column::Distance, _, Val::Points(b, e)) => (*e - *b).len().to_string(),
+        (Column::Angle, ParameterKind::Rotation { base: hb, end: he, .. }, Val::Points(b, e)) => {
+            angle(rotation_angle(*b, *e, (*hb, *he))).to_string()
+        }
+        (Column::Angle, _, Val::Points(b, e)) => angle((*e - *b).xy().angle()).to_string(),
+        (Column::DistanceX, _, Val::Points(b, e)) => (e.x - b.x).to_string(),
+        (Column::DistanceY, _, Val::Points(b, e)) => (e.y - b.y).to_string(),
+        (Column::X, _, Val::Point(at)) => (at.x - m.base.x).to_string(),
+        (Column::Y, _, Val::Point(at)) => (at.y - m.base.y).to_string(),
+        (Column::Flip, _, Val::Flip(_, _, f)) => i32::from(*f).to_string(),
+        _ => return None,
+    };
+    Some(out)
+}
+
+/// Property `property` of parameter `node` on a reference with values `values`, as a lookup table
+/// cell writes it.
+pub(super) fn property_text(m: &DynamicBlock, values: &BTreeMap<i32, Value>, node: i32, property: &str) -> Option<String> {
+    column_text(m, node, property, &current(m, values, node)?)
 }
 
 /// Whether table cell `cell` reads as `value` (numbers compare as numbers).
@@ -358,6 +451,7 @@ pub fn set_property(d: &mut Drawing, insert: Handle, name: &str, value: &str) ->
                 (dist, a)
             };
             plan.set.insert(p.node, Val::Points(b, b + Vec2::new(a.cos(), a.sin()).to3(0.0) * len));
+            plan.chain(&m, &r.values, p.node)?;
         }
         (ParameterKind::Xy { x_values, y_values, x_label, y_label, .. }, _) => {
             let Some(Val::Points(b, e)) = current(&m, &r.values, p.node) else { return Err(format!("{name} has no points.")) };
@@ -370,13 +464,14 @@ pub fn set_property(d: &mut Drawing, insert: Handle, name: &str, value: &str) ->
             let v = allowed(set, v);
             let e2 = if second { Vec3::new(e.x, b.y + v, e.z) } else { Vec3::new(b.x + v, e.y, e.z) };
             plan.set.insert(p.node, Val::Points(b, e2));
+            plan.chain(&m, &r.values, p.node)?;
         }
         (ParameterKind::Visibility { states, label, .. }, _) => {
             let s = states.iter().find(|s| s.name.eq_ignore_ascii_case(value.trim())).ok_or_else(|| {
                 format!("\"{value}\" is not a state of {label}: {}.", states.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", "))
             })?;
             plan.set.insert(p.node, Val::Text(s.name.clone()));
-            plan.chain(&m, &r.values, p.node, "VisibilityState")?;
+            plan.chain(&m, &r.values, p.node)?;
         }
         (ParameterKind::Lookup { label, .. }, _) => {
             plan.set.insert(p.node, Val::Text(value.trim().to_string()));
@@ -384,25 +479,27 @@ pub fn set_property(d: &mut Drawing, insert: Handle, name: &str, value: &str) ->
                 return Err(format!("\"{value}\" is not a value of {label}."));
             }
         }
-        (ParameterKind::Linear { values, from_midpoint, .. }, None) => {
+        // AutoCAD takes a distance of 0 (a value list can offer it), not one below.
+        (ParameterKind::Linear { values, from_midpoint, base: hb, end: he, .. }, None) => {
             let typed = number(value)? / sx;
-            if typed <= 0.0 {
-                return Err(format!("{name} must be more than 0."));
+            if typed < 0.0 {
+                return Err(format!("{name} can't be less than 0."));
             }
             let dist = allowed(values, typed);
-            if dist <= 0.0 {
-                return Err(format!("{name} must be more than 0."));
+            if !(dist >= 0.0 && dist.is_finite()) {
+                return Err(format!("{name} can't be less than 0."));
             }
             let Some(Val::Points(b, e)) = current(&m, &r.values, p.node) else { return Err(format!("{name} has no points.")) };
-            let (b2, e2) = linear_points(b, e, dist, *from_midpoint);
+            let (b2, e2) = linear_points(b, e, dist, *from_midpoint, *he - *hb);
             plan.set.insert(p.node, Val::Points(b2, e2));
-            plan.chain(&m, &r.values, p.node, "UpdatedDistance")?;
+            plan.chain(&m, &r.values, p.node)?;
         }
         (ParameterKind::Point { .. }, Some(is_x)) => {
             let Some(Val::Point(at)) = current(&m, &r.values, p.node) else { return Err(format!("{name} has no position.")) };
             let v = number(value)?;
             let at = if is_x { Vec3::new(block_base.x + v / sx, at.y, at.z) } else { Vec3::new(at.x, block_base.y + v / sy, at.z) };
             plan.set.insert(p.node, Val::Point(at));
+            plan.chain(&m, &r.values, p.node)?;
         }
         // An angle in degrees, as Properties shows it, snapped to the parameter's values.
         (ParameterKind::Rotation { base: hb, end: he, values, label, .. }, None) => {
@@ -414,7 +511,7 @@ pub fn set_property(d: &mut Drawing, insert: Handle, name: &str, value: &str) ->
             }
             let Some(Val::Points(b, e)) = current(&m, &r.values, p.node) else { return Err(format!("{name} has no points.")) };
             plan.set.insert(p.node, Val::Points(b, rotation_end(b, e, (*hb, *he), a)));
-            plan.chain(&m, &r.values, p.node, "UpdatedAngle")?;
+            plan.chain(&m, &r.values, p.node)?;
         }
         // A state by name (or 0 / 1); its flip grip's record follows.
         (ParameterKind::Flip { states, label, .. }, None) => {
@@ -431,6 +528,7 @@ pub fn set_property(d: &mut Drawing, insert: Handle, name: &str, value: &str) ->
             if let Some(g) = p.grips.first().filter(|g| **g != 0) {
                 plan.set.insert(*g, Val::State(flipped));
             }
+            plan.chain(&m, &r.values, p.node)?;
         }
         _ => return Err(format!("CADCraft can't change {name} yet.")),
     }
@@ -453,15 +551,14 @@ pub fn drag_grip(d: &mut Drawing, insert: Handle, node: i32, part: super::GripPa
     let base = d.block(&r.definition).map(|b| b.base.xy()).unwrap_or_default();
     let q = ins.transform(base).inverse().ok_or("The reference has a zero scale.")?.apply(to);
     let p = m.parameters.iter().find(|p| p.node == node).ok_or("The reference has no such parameter.")?;
+    if matches!(p.kind, ParameterKind::Alignment { .. }) {
+        return align_grip(d, insert, node, to, None);
+    }
     let mut plan = Plan::default();
     match (&p.kind, part) {
-        (ParameterKind::Linear { values, from_midpoint, label, .. }, GripPart::Base | GripPart::End) => {
+        (ParameterKind::Linear { values, from_midpoint, label, base: hb, end: he, .. }, GripPart::Base | GripPart::End) => {
             let Some(Val::Points(b, e)) = current(&m, &r.values, node) else { return Err(format!("{label} has no points.")) };
-            let len = (e - b).len();
-            if len < 1e-12 {
-                return Err(format!("{label} has no direction."));
-            }
-            let u = (e - b) * (1.0 / len);
+            let u = unit_along(e - b, *he - *hb);
             let q = Vec3::new(q.x, q.y, b.z);
             let raw = if *from_midpoint {
                 2.0 * (q - (b + e) * 0.5).dot(u).abs()
@@ -475,12 +572,11 @@ pub fn drag_grip(d: &mut Drawing, insert: Handle, node: i32, part: super::GripPa
                 return Err(format!("{label} must be more than 0."));
             }
             let (b2, e2) = match (from_midpoint, part) {
-                (true, _) => linear_points(b, e, dist, true),
+                (true, _) => linear_points(b, e, dist, true, u),
                 (false, GripPart::Base) => (e - u * dist, e),
                 (false, _) => (b, b + u * dist),
             };
             plan.set.insert(node, Val::Points(b2, e2));
-            plan.chain(&m, &r.values, node, "UpdatedDistance")?;
         }
         (ParameterKind::Point { label, .. }, GripPart::At) => {
             let Some(Val::Point(at)) = current(&m, &r.values, node) else { return Err(format!("{label} has no position.")) };
@@ -554,11 +650,50 @@ pub fn drag_grip(d: &mut Drawing, insert: Handle, node: i32, part: super::GripPa
                 .unwrap_or(0.0);
             let a = allowed(values, (rotation_angle(b, q3, (*hb, *he)) - offset).rem_euclid(std::f64::consts::TAU));
             plan.set.insert(node, Val::Points(b, rotation_end(b, e, (*hb, *he), a)));
-            plan.chain(&m, &r.values, node, "UpdatedAngle")?;
         }
         _ => return Err("That grip can't be dragged.".into()),
     }
+    plan.chain(&m, &r.values, node)?;
     apply(d, insert, &r.definition, &r.values, &plan.set, node)
+}
+
+/// Drag the grip of alignment parameter `node` of dynamic block reference `insert` to `to`
+/// (drawing coordinates), as AutoCAD does: with `near`, the nearest point of an object at the
+/// cursor and the object's direction there, the reference moves so the parameter's base point is
+/// on that point and turns so the parameter's direction (base to end) runs along the object, its
+/// right-hand side toward the cursor (toward where the grip was when the cursor is on the object);
+/// without, the base point just follows the cursor. Only the reference's position and rotation
+/// change (AutoCAD records no value for it).
+pub fn align_grip(d: &mut Drawing, insert: Handle, node: i32, to: Vec2, near: Option<(Vec2, Vec2)>) -> Result<(), String> {
+    if !to.is_finite() || near.is_some_and(|(at, along)| !(at.is_finite() && along.is_finite())) {
+        return Err("Invalid point.".into());
+    }
+    let r = reference(d, insert).ok_or("Not a dynamic block reference.")?;
+    let m = dynamic_block(d, &r.definition).ok_or("Not a dynamic block reference.")?;
+    let EntityKind::Insert(ins) = &d.entity(insert).ok_or("No such object.")?.kind else { return Err("Not a block reference.".into()) };
+    let p = m.parameters.iter().find(|p| p.node == node).ok_or("The reference has no such parameter.")?;
+    if !matches!(p.kind, ParameterKind::Alignment { .. }) {
+        return Err("That isn't an alignment grip.".into());
+    }
+    let Some(Val::Points(b, e)) = current(&m, &r.values, node) else { return Err("The alignment has no points.".into()) };
+    let base = d.block(&r.definition).map(|b| b.base.xy()).unwrap_or_default();
+    let xf = ins.transform(base);
+    let (wb, way) = (xf.apply(b.xy()), xf.apply(e.xy()) - xf.apply(b.xy()));
+    let (at, turn) = match near {
+        Some((at, along)) if along.len() > 1e-12 && way.len() > 1e-12 => {
+            let u = along * (1.0 / along.len());
+            let side = if (to - at).len() > 1e-9 { to - at } else { wb - at };
+            let dir = if Vec2::new(u.y, -u.x).dot(side) < 0.0 { u * -1.0 } else { u };
+            (at, dir.angle() - way.angle())
+        }
+        Some((at, _)) => (at, 0.0),
+        None => (to, 0.0),
+    };
+    let t = Mat3::rotate_about(wb, turn).then(Mat3::translate(at - wb));
+    if !(turn.is_finite() && t.apply(Vec2::ZERO).is_finite()) {
+        return Err("Invalid point.".into());
+    }
+    d.modify_entity(insert, |e| e.kind.transform(&t)).map_err(|e| e.to_string())
 }
 
 /// Most stops one grip shows.
@@ -774,6 +909,41 @@ impl ActionRun<'_> {
         Ok(arrays)
     }
 
+    /// A base point parameter the actions moved: AutoCAD keeps it at the block's base point, so the
+    /// block's objects and parameters move back by its move, and the reference's insertion point
+    /// moves forward by it (the returned move: the reference stays where it was, but for what the
+    /// actions changed). (A fixed base point of a rotate or scale action stays where the dynamic
+    /// block has it.)
+    fn rebase(&mut self, src: &Block) -> Vec2 {
+        let mut rebase = Vec2::ZERO;
+        if let Some(p) = self.m.parameters.iter().find(|p| matches!(p.kind, ParameterKind::BasePoint { .. }))
+            && let (Some(Val::Point(was)), Some(Val::Point(now))) = (current(self.m, self.values, p.node), self.new.get(&p.node).cloned())
+        {
+            let v = (now - was).xy();
+            if v.len() > 1e-12 && v.is_finite() {
+                rebase = v;
+                self.new.insert(p.node, Val::Point(was));
+            }
+        }
+        if rebase == Vec2::ZERO {
+            return rebase;
+        }
+        for e in src.entities.iter() {
+            self.moves.entry(e.handle).or_default().push(Op::Move(None, rebase * -1.0));
+        }
+        let back = |q: Vec3| q - rebase.to3(0.0);
+        for p in self.m.parameters.iter().filter(|p| !matches!(p.kind, ParameterKind::BasePoint { .. })) {
+            let moved = match self.value_of(p.node) {
+                Some(Val::Point(q)) => Val::Point(back(q)),
+                Some(Val::Points(b, e)) => Val::Points(back(b), back(e)),
+                Some(Val::Flip(b, e, f)) => Val::Flip(back(b), back(e), f),
+                _ => continue,
+            };
+            self.new.insert(p.node, moved);
+        }
+        rebase
+    }
+
     /// A rotate, flip or scale action turns, mirrors or scales its objects, and carries the
     /// parameters in its selection the same way. A handle the selection repeats is handled once
     /// (twice would turn or scale it twice, or mirror it back).
@@ -979,6 +1149,7 @@ fn apply(
         run.action(a)?;
     }
     let arrays = run.arrays()?;
+    let rebase = run.rebase(&src);
     let earlier = earlier_copies(&src, &src_tag, &arrays);
     let ActionRun { new, moves, .. } = run;
     // Visibility states.
@@ -1118,12 +1289,15 @@ fn apply(
     // block-to-drawing transform), is the change of the reference's attribute.
     let to_world = ins.transform(src.base.xy());
     let to_block = to_world.inverse().unwrap_or(Mat3::IDENTITY);
+    // The insertion point's move for a moved base point (the block's objects moved back by it).
+    let shift = to_world.apply(rebase) - to_world.apply(Vec2::ZERO);
     d.modify_entity(insert, |e| {
         if let EntityKind::Insert(i) = &mut e.kind {
             i.block = name.clone();
+            i.insert = i.insert + shift.to3(0.0);
             for a in &mut i.attribs {
                 if let Some(t) = attrib_moves.get(&a.tag.to_ascii_uppercase()) {
-                    let w = to_block.then(*t).then(to_world);
+                    let w = to_block.then(*t).then(Mat3::translate(rebase)).then(to_world);
                     carry_text(&mut a.text, &w);
                     a.transform_multiline(&w);
                 }
@@ -1388,9 +1562,13 @@ fn record_values(
             }
             None => {
                 let h = d.new_handle();
-                let mut tags = templates.get(&key).cloned().unwrap_or_else(|| {
-                    let p = at(*node);
-                    vec![tag(100, "AcDbXrecord"), tag(280, "1"), tag(10, p.x.to_string()), tag(20, p.y.to_string()), tag(30, p.z.to_string())]
+                let mut tags = templates.get(&key).cloned().unwrap_or_else(|| match v {
+                    // A flip grip's record: its header's groups and two states, the last one its own.
+                    Val::State(_) => vec![tag(100, "AcDbXrecord"), tag(280, "1"), tag(70, "25"), tag(70, "104"), tag(70, "0"), tag(70, "0")],
+                    _ => {
+                        let p = at(*node);
+                        vec![tag(100, "AcDbXrecord"), tag(280, "1"), tag(10, p.x.to_string()), tag(20, p.y.to_string()), tag(30, p.z.to_string())]
+                    }
                 });
                 write_value(&mut tags, v);
                 objects.push(ForeignObject { handle: h, kind: "XRECORD".into(), tags: own(tags, h, data) });

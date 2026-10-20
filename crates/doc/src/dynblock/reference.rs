@@ -53,8 +53,8 @@ pub struct CustomProperty {
     /// The values it may be set to, when it is a choice (visibility states, lookup values, a
     /// distance's list).
     pub choices: Vec<String>,
-    /// CADCraft can change it ([`super::set_property`]): a visibility state, a distance, a
-    /// position, or a lookup whose tables set only those.
+    /// CADCraft can change it ([`super::set_property`]): a visibility state, a distance, an angle,
+    /// a position, a flip state, or a lookup whose tables set only those.
     pub editable: bool,
 }
 
@@ -198,26 +198,7 @@ struct Current<'a> {
 impl Current<'_> {
     /// Parameter `node`'s value of property `property`, as table cells write it.
     fn property(&self, node: i32, property: &str) -> Option<String> {
-        let p = self.m.parameters.iter().find(|p| p.node == node)?;
-        let v = self.values.get(&node);
-        match (&p.kind, property.to_ascii_lowercase().as_str()) {
-            (ParameterKind::Visibility { states, .. }, "visibilitystate") => match v {
-                Some(Value::Text { value }) => Some(value.clone()),
-                _ => states.first().map(|s| s.name.clone()),
-            },
-            (ParameterKind::Linear { base, end, .. }, "updateddistance" | "distance") => {
-                let (b, e) = match v {
-                    Some(Value::Points { base, end }) => (*base, *end),
-                    _ => (*base, *end),
-                };
-                Some(format!("{}", (e - b).len()))
-            }
-            (ParameterKind::Lookup { .. }, "lookupstring") => match v {
-                Some(Value::Text { value }) => Some(value.clone()),
-                _ => None,
-            },
-            _ => None,
-        }
+        super::apply::property_text(self.m, self.values, node, property)
     }
 
     /// Lookup parameter `node`'s value: the value every lookup table that sets it gives for the
@@ -341,7 +322,8 @@ pub fn custom_properties(d: &Drawing, insert: Handle) -> Option<(String, Vec<Cus
 }
 
 /// Whether every lookup table that sets lookup parameter `node` sets only what
-/// [`super::set_property`] can apply with it: visibility states and distances.
+/// [`super::set_property`] can apply with it: visibility states, distances, angles, positions and
+/// flip states.
 fn lookup_sets_what_changes(m: &DynamicBlock, node: i32) -> bool {
     let mut any = false;
     for a in &m.actions {
@@ -350,10 +332,10 @@ fn lookup_sets_what_changes(m: &DynamicBlock, node: i32) -> bool {
             continue;
         }
         any = true;
-        if !columns
-            .iter()
-            .all(|c| matches!(c.property.to_ascii_lowercase().as_str(), "lookupstring" | "visibilitystate" | "updateddistance" | "distance"))
-        {
+        let settable = |c: &super::LookupColumn| {
+            m.parameters.iter().find(|p| p.node == c.node).is_some_and(|p| super::apply::column(&p.kind, &c.property).is_some())
+        };
+        if !columns.iter().all(settable) {
             return false;
         }
     }

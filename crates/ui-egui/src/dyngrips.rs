@@ -1,8 +1,9 @@
 //! Dynamic block grips on the canvas, as AutoCAD shows them on a selected dynamic block
 //! reference: an arrow at a distance's end (drag it to change the distance), a square at a
 //! position (drag it to move it), a circle at an angle's end (drag it to turn), an arrow across a
-//! reflection line (click it to flip) and a down-pointing triangle for a list (click it for the
-//! visibility states or lookup values). Dragging runs the engine's dynamic grip edit
+//! reflection line (click it to flip), a down-pointing triangle for a list (click it for the
+//! visibility states or lookup values) and a pentagon at an alignment's base point (drag it next to
+//! an object to align the reference with it). Dragging runs the engine's dynamic grip edit
 //! ([`cadcraft_engine::Session::start_dyn_grip`]); a list choice runs `blocks.reference.set`.
 
 use std::sync::Arc;
@@ -86,6 +87,13 @@ fn outline(xf: &Xf, g: &DynGrip, gs: f32) -> Vec<Pos2> {
                 c - u * neck - n * shaft,
                 c - u * tail - n * shaft,
             ]
+        }
+        // A square with a point on the side the grip points to (across the alignment direction).
+        GripShape::Alignment => {
+            let ahead = xf.to_screen(g.at + g.dir) - c;
+            let u = if ahead.length() > 1e-6 { ahead / ahead.length() } else { vec2(0.0, -1.0) };
+            let n = vec2(-u.y, u.x);
+            vec![c - u * gs - n * gs, c + u * (gs * 0.2) - n * gs, c + u * (gs * 1.4), c + u * (gs * 0.2) + n * gs, c - u * gs + n * gs]
         }
     }
 }

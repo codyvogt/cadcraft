@@ -47,9 +47,23 @@ fn drag(s: &mut Session, h: Handle, node: i32, part: GripPart, to: Vec2) -> std:
         return Err("the reference is on a locked layer".into());
     }
     let mut d = s.doc().map_err(|e| e.to_string())?.clone();
-    dynblock::drag_grip(&mut d, h, node, part, to)?;
+    drag_in(s, &mut d, h, node, part, to)?;
     *s.doc_mut().map_err(|e| e.to_string())? = d;
     Ok(())
+}
+
+/// Drag grip (`node`, `part`) of reference `h` to `to` in drawing `d`; an alignment grip aligns
+/// the reference with the object at the cursor (within the aperture), as AutoCAD does.
+fn drag_in(s: &Session, d: &mut Drawing, h: Handle, node: i32, part: GripPart, to: Vec2) -> std::result::Result<(), String> {
+    let alignment = dynblock::reference(d, h)
+        .and_then(|r| dynblock::dynamic_block(d, &r.definition))
+        .is_some_and(|m| m.parameters.iter().any(|p| p.node == node && matches!(p.kind, dynblock::ParameterKind::Alignment { .. })));
+    if !alignment {
+        return dynblock::drag_grip(d, h, node, part, to);
+    }
+    let aperture = s.pixel_size() * s.settings.aperture.max(1.0);
+    let near = crate::snap::nearest_with_direction(d, &s.space(), to, aperture, h);
+    dynblock::align_grip(d, h, node, to, near)
 }
 
 /// The properties an object of a block draws with in reference `r`: on layer 0 it is on the
@@ -138,6 +152,7 @@ impl Interactive for DynGripEdit {
         let (msg, accept) = match self.shape {
             GripShape::Linear => ("** STRETCH ** Specify stretch point or distance", Accept::POINT_OR_NUMBER),
             GripShape::Rotation => ("** ROTATE ** Specify rotation point or angle", Accept::POINT_OR_NUMBER),
+            GripShape::Alignment => ("Specify point location", Accept::POINT),
             _ => ("** STRETCH ** Specify stretch point", Accept::POINT),
         };
         let p = Prompt::new(msg, accept).kw(&["eXit"]).base(self.from);
@@ -194,7 +209,7 @@ impl Interactive for DynGripEdit {
     fn preview_objects(&self, s: &Session, c: Vec2) -> Vec<Entity> {
         let Ok(d) = s.doc() else { return Vec::new() };
         let mut d = d.clone();
-        match dynblock::drag_grip(&mut d, self.handle, self.node, self.part, c) {
+        match drag_in(s, &mut d, self.handle, self.node, self.part, c) {
             Ok(()) => drawn(&d, self.handle),
             Err(_) => Vec::new(),
         }

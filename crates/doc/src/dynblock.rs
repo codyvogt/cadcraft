@@ -22,7 +22,7 @@ use crate::{Drawing, Handle, RawTag};
 mod apply;
 mod grips;
 mod reference;
-pub use apply::{drag_grip, grip_stops, set_property};
+pub use apply::{align_grip, drag_grip, grip_stops, set_property};
 pub use grips::{DynGrip, GripPart, GripShape, grips};
 pub use reference::{CustomProperty, Reference, Value, custom_properties, reference};
 
@@ -56,6 +56,9 @@ pub struct DynamicBlock {
     /// reflection line).
     #[serde(skip)]
     pub grip_points: Vec<(i32, Vec3)>,
+    /// The block's base point (where a base point parameter is in the block).
+    #[serde(skip)]
+    pub base: Vec3,
 }
 
 /// One parameter: a property a reference to the block can change.
@@ -118,8 +121,11 @@ pub enum ParameterKind {
     /// An angle about a base point (Angle1): the end point turns about the base. The angle is
     /// measured from the direction the dynamic block has from base to end.
     Rotation { base: Vec3, end: Vec3, label: String, description: String, values: ValueSet },
-    /// Aligns the reference with nearby geometry.
-    Alignment { base: Vec3, end: Vec3 },
+    /// Aligns the reference with nearby geometry: dragged next to an object, its base point lands
+    /// on the object and the direction from base to end runs along it. `perpendicular` is the
+    /// parameter's type (perpendicular, else tangent); AutoCAD aligned both types the same way in
+    /// every case measured.
+    Alignment { base: Vec3, end: Vec3, perpendicular: bool },
     /// Mirrors the objects about the reflection line from base to end (Flip state1); the names
     /// of its two states, not flipped and flipped.
     Flip { base: Vec3, end: Vec3, label: String, description: String, states: [String; 2] },
@@ -136,7 +142,9 @@ pub enum ParameterKind {
     },
     /// A named value chosen from a lookup table.
     Lookup { at: Vec3, label: String, description: String },
-    /// Moves the block's base point.
+    /// The block's base point: the reference's insertion point is here, and an action that moves
+    /// it moves the reference's insertion point. `at` is where the block editor showed it; the
+    /// block itself has it at its base point (AutoCAD moves the block's objects to put it there).
     BasePoint { at: Vec3 },
     /// A parameter type not modelled yet.
     Other { dxf_type: String },
@@ -406,7 +414,7 @@ fn graph_members<'a>(objects: &HashMap<Handle, &'a ForeignObject>, xdict: Handle
 pub fn dynamic_block(d: &Drawing, name: &str) -> Option<DynamicBlock> {
     let xdict = d.foreign.records.get(&("BLOCK_RECORD".to_string(), name.trim().to_ascii_uppercase()))?.xdict?;
     let objects: HashMap<Handle, &ForeignObject> = d.foreign.objects.iter().map(|o| (o.handle, o)).collect();
-    let mut out = DynamicBlock::default();
+    let mut out = DynamicBlock { base: d.block(name.trim()).map(|b| b.base).unwrap_or_default(), ..Default::default() };
     for o in graph_members(&objects, xdict)? {
         let secs = sections(&o.tags);
         let node = Cursor::new(section(&secs, "AcDbEvalExpr")).int(90);
@@ -514,9 +522,11 @@ fn parameter(kind: &str, secs: &[(&str, &[RawTag])]) -> ParameterKind {
             let x_values = value_set_at(&mut c, [410, 96, 142, 175]);
             ParameterKind::Xy { base, end, x_label, y_label, x_description, y_description, x_values, y_values }
         }
+        // Its type (280): 1 perpendicular, 0 tangent.
         "BLOCKALIGNMENTPARAMETER" => {
             let (base, end) = two();
-            ParameterKind::Alignment { base, end }
+            let perpendicular = Cursor::new(section(secs, "AcDbBlockAlignmentParameter")).int(280) != 0;
+            ParameterKind::Alignment { base, end, perpendicular }
         }
         other => ParameterKind::Other { dxf_type: other.to_string() },
     }

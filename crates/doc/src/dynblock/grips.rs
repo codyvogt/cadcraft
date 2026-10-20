@@ -1,7 +1,9 @@
 //! The grips of a dynamic block reference, as AutoCAD shows them on a selected reference: an
 //! arrow at each end of a distance (linear parameter), a square at a position (point parameter),
 //! a circle at the end of an angle (rotation parameter), a flip arrow across a reflection line
-//! (flip parameter) and a down-pointing triangle for a list (visibility states, lookup values).
+//! (flip parameter), a down-pointing triangle for a list (visibility states, lookup values) and a
+//! pentagon pointing across the alignment direction at an alignment's base point (alignment
+//! parameter; dragged next to an object it aligns the reference with it, [`super::align_grip`]).
 //! Dragging an arrow, square or circle is [`super::drag_grip`]; a flip grip flips at a click; a
 //! list grip offers its property's choices.
 //!
@@ -88,6 +90,9 @@ pub enum GripShape {
     Rotation,
     /// An arrow across a reflection line: click it to flip (its choices are the two states).
     Flip,
+    /// A pentagon pointing to the left of an alignment's direction: drag it next to an object to
+    /// align the reference with it.
+    Alignment,
 }
 
 /// One grip of a dynamic block reference.
@@ -308,6 +313,26 @@ pub fn grips(d: &Drawing, insert: Handle) -> Vec<DynGrip> {
                         at,
                         dir: Vec2::ZERO,
                         property: label.clone(),
+                        choices: Vec::new(),
+                    });
+                }
+            }
+            // At the base point, pointing to the left of the direction (as AutoCAD draws it).
+            ParameterKind::Alignment { base, end, .. } => {
+                let (b, e) = match r.values.get(&p.node) {
+                    Some(Value::Points { base, end }) => (*base, *end),
+                    _ => (*base, *end),
+                };
+                let u = (e - b).xy();
+                if shown(p.node, grip(0)) && u.len() > 1e-12 {
+                    let (at, dir) = (world(b), toward(b, u.perp().to3(0.0)));
+                    out.push(DynGrip {
+                        node: p.node,
+                        part: GripPart::Base,
+                        shape: GripShape::Alignment,
+                        at,
+                        dir,
+                        property: String::new(),
                         choices: Vec::new(),
                     });
                 }
