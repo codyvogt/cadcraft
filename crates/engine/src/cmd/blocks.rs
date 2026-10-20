@@ -62,7 +62,7 @@ pub fn specs() -> Vec<CommandSpec> {
             .params("{handle (a dynamic block reference), name (a custom property as Properties names it: a visibility state, a lookup, a distance, \"Position1 X\", an angle or a flip state), value (lengths in drawing units, angles in degrees; a flip state by name or 0/1)} → {properties}")
             .enabled(has_doc),
         CommandSpec::new("blocks.reference.grips", "Dynamic Block Grips", dyngrip::run_grips)
-            .params("{handle} → [{node, part: base|end|at, shape: linear|point|list|rotation|flip, at: [x,y], dir: [x,y], property, choices?}] (empty: not a dynamic block reference)")
+            .params("{handle} → [{node, part: base|end|at|basex-endy|basey-endx, shape: linear|point|list|rotation|flip, at: [x,y], dir: [x,y], property, choices?}] (empty: not a dynamic block reference)")
             .enabled(has_doc)
             .noundo(),
         CommandSpec::new("blocks.reference.grip", "Drag Dynamic Grip", dyngrip::run_grip)

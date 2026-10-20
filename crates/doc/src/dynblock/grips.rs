@@ -28,9 +28,12 @@ pub enum GripPart {
     End,
     /// A one-point parameter's point (a position, a visibility or lookup grip).
     At,
-    /// An XY parameter's corner at the base's X and the end's Y.
+    /// An XY parameter's corner at the base's X and the end's Y (listed as `blocks.reference.grip`
+    /// takes it, as [`GripPart::name`] names it).
+    #[serde(rename = "basex-endy")]
     BaseXEndY,
     /// An XY parameter's corner at the end's X and the base's Y.
+    #[serde(rename = "basey-endx")]
     BaseYEndX,
 }
 
@@ -52,6 +55,21 @@ impl GripPart {
             "basex-endy" => Some(GripPart::BaseXEndY),
             "basey-endx" => Some(GripPart::BaseYEndX),
             _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GripPart;
+
+    /// A grip is listed with the part name `blocks.reference.grip` takes back.
+    #[test]
+    fn listed_part_names_are_the_names_a_drag_takes() {
+        for p in [GripPart::Base, GripPart::End, GripPart::At, GripPart::BaseXEndY, GripPart::BaseYEndX] {
+            let listed = serde_json::to_value(p).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+            assert_eq!(listed, p.name());
+            assert_eq!(GripPart::from_name(&listed), Some(p));
         }
     }
 }
