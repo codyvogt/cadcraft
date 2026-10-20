@@ -1,6 +1,6 @@
 # File-format parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-28 · **Change:** minor (attribute value edits refresh exported baselines) · **Target:** Autodesk AutoCAD 2027
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-28 · **Change:** minor (attribute value edits refresh exported baselines; dynamic block scale and polar stretch actions read) · **Target:** Autodesk AutoCAD 2027
 
 Every format AutoCAD 2027 reads or writes, with CADCraft's support, fidelity and tests. Work
 items are in [gaps.md](gaps.md#file-formats); the weighted score feeds
@@ -147,6 +147,7 @@ our output in AutoCAD black-box.
 | 2026-10-19 | minor | A file's own arrowhead blocks with standard names (AutoCAD's `_Dot`, `_DotSmall`), named only by a dimension style, are kept and saved as they were instead of being replaced by CADCraft's solids; PURGE keeps arrowhead blocks dimension styles name |
 | 2026-10-20 | minor | DIMENSION: the `*D` block's MTEXT, and the MTEXT EXPLODE leaves, hold the diameter sign as `%%c` instead of the decoded U+2300, which no SHX font has, so other programs plotted diameter dimensions in an SHX style without the sign (#1645) |
 | 2026-10-21 | minor | Proxy objects and entities keep their class through a save: group 91 renumbered to the written CLASSES (the class it names is kept), a proxy whose number names no class dropped (#1812) |
+| 2026-10-19 | minor | Dynamic blocks: scale actions (base point, connections) and polar stretch actions (frame, stretched vertices, rotate-only objects) read |
 | 2026-10-19 | minor | Dynamic blocks: polar and XY parameters (names, value sets, corner grips) and array actions (row and column offsets) read; arrayed copies saved with AutoCAD's `AcDbBlockArrayActionTag`, without which AutoCAD can't change the reference again |
 | 2026-10-17 | minor | DWG read: DGN line style components no line style definition reaches are left out before the DXF bridge, with a read note; an 83 MB site plan with 888,483 of them (1.2 GB of DXF, over the limit) now opens (#1482) |
 | 2026-10-13 | minor | Dynamic blocks: rotation and flip parameters and actions read; changed references saved with AutoCAD's value records and history (flip state after the points, flip grip state) |

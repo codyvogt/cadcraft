@@ -241,40 +241,37 @@ pub enum ActionKind {
         angle_offset: f64,
     },
     /// A table: each row sets the listed parameter values together.
-    Lookup {
-        columns: Vec<LookupColumn>,
-        rows: Vec<Vec<String>>,
-    },
+    Lookup { columns: Vec<LookupColumn>, rows: Vec<Vec<String>> },
     /// Moves the objects by the change of the parameter values it follows.
-    Move {
-        multiplier: f64,
-        angle_offset: f64,
-    },
+    Move { multiplier: f64, angle_offset: f64 },
     /// Scales the objects about its base point by how much the distances it follows grew: a
     /// distance's (linear or polar parameter) for both axes, or an XY parameter's horizontal and
     /// vertical distances for each axis on its own. Its connections name what each reads ("Scale",
     /// "XScale", "YScale").
-    Scale {
-        base: ActionBase,
-    },
+    Scale { base: ActionBase },
     /// Turns the objects about its base point by the change of a rotation parameter's angle.
-    Rotate {
-        base: ActionBase,
-    },
+    Rotate { base: ActionBase },
     /// Mirrors the objects across a flip parameter's reflection line when its state changes.
     Flip,
     /// Repeats the objects as far as the parameter it follows reaches: along a distance (linear
     /// or polar parameter) every `column` units, or in a grid of columns and rows across an XY
     /// parameter's distances. The objects follow the parameter's base point.
-    Array {
-        column: f64,
-        row: f64,
+    Array { column: f64, row: f64 },
+    /// Follows a polar parameter: turns its objects about the parameter's base point by the change
+    /// of its angle, and moves the vertices inside `frame` of the objects listed (all of an object
+    /// not listed) along the parameter's new direction by the change of its distance. The
+    /// `rotate_only` objects (outside the selection) only turn.
+    PolarStretch {
+        frame: Vec<Vec2>,
+        #[serde(serialize_with = "hex_vertices")]
+        vertices: Vec<(Handle, Vec<i32>)>,
+        #[serde(serialize_with = "hexes")]
+        rotate_only: Vec<Handle>,
+        multiplier: f64,
+        angle_offset: f64,
     },
-    PolarStretch,
     /// An action type not modelled yet.
-    Other {
-        dxf_type: String,
-    },
+    Other { dxf_type: String },
 }
 
 /// Where an action that turns or scales its objects has its base point.
@@ -612,7 +609,7 @@ fn action(handle: Handle, node: i32, name: String, kind: &str, secs: &[(&str, &[
             let (row, column) = (c.real(140), c.real(141));
             (connections, ActionKind::Array { column, row })
         }
-        "BLOCKPOLARSTRETCHACTION" => (Vec::new(), ActionKind::PolarStretch),
+        "BLOCKPOLARSTRETCHACTION" => polar_stretch(section(secs, "AcDbBlockPolarStretchAction")),
         other => (Vec::new(), ActionKind::Other { dxf_type: other.to_string() }),
     };
     Action { node, handle, name, at, selection, connections, kind }
@@ -663,6 +660,42 @@ fn stretch(tags: &[RawTag]) -> (Vec<(i32, String)>, ActionKind) {
     (connections, ActionKind::Stretch { frame, vertices, multiplier, angle_offset })
 }
 
+/// A polar stretch action: its six connections (92-97 with 301-306), the frame (73 count,
+/// 1011/1021 points), the objects it only turns (72 count, 331 each), the objects whose vertices it
+/// moves (74 count; each a 332 handle, a 75 count and 76 vertex indices), more vertex lists (78
+/// count; each a 98 code, a 79 count and 76 indices), then the distance multiplier (141) and angle
+/// offset (140).
+fn polar_stretch(tags: &[RawTag]) -> (Vec<(i32, String)>, ActionKind) {
+    let first = |code: i32| Cursor::new(tags).next(code).unwrap_or_default().to_string();
+    let connections = (0..6).map(|i| (first(92 + i).trim().parse().unwrap_or(0), first(301 + i))).collect();
+    let mut c = Cursor::new(tags);
+    let n = c.count(73);
+    let frame = (0..n)
+        .map(|_| {
+            let x = c.real(1011);
+            Vec2::new(x, c.real(1021))
+        })
+        .collect();
+    let n = c.count(72);
+    let rotate_only = c.handles(331, n);
+    let objects = c.count(74);
+    let vertices = (0..objects)
+        .filter_map(|_| {
+            let h = c.handle(332)?;
+            let n = c.count(75);
+            Some((h, (0..n).map(|_| c.int(76)).collect()))
+        })
+        .collect();
+    for _ in 0..c.count(78) {
+        c.next(98);
+        for _ in 0..c.count(79) {
+            c.next(76);
+        }
+    }
+    let (multiplier, angle_offset) = (c.real(141), c.real(140));
+    (connections, ActionKind::PolarStretch { frame, vertices, rotate_only, multiplier, angle_offset })
+}
+
 /// A lookup table: rows (92) and columns (93), the cells row by row (302, after a 301 header),
 /// then each column: unmatched name (303 then 305), parameter id (94), lookup flag (282) and the
 /// parameter value it stands for (304).
@@ -708,6 +741,14 @@ mod tests {
         let mut tags = vec![tag(73, &n.to_string())];
         tags.extend((0..n).flat_map(|_| [tag(331, "1F"), tag(74, &n.to_string())]));
         let (_, ActionKind::Stretch { vertices, .. }) = stretch(&tags) else { panic!("a stretch action") };
+        let ints: usize = vertices.iter().map(|(_, v)| v.len()).sum();
+        assert!(ints <= 16 * tags.len() + 1024, "{ints}");
+
+        let mut tags = vec![tag(74, &n.to_string())];
+        tags.extend((0..n).flat_map(|_| [tag(332, "1F"), tag(75, &n.to_string())]));
+        tags.push(tag(78, &n.to_string()));
+        tags.extend((0..n).map(|_| tag(79, &n.to_string())));
+        let (_, ActionKind::PolarStretch { vertices, .. }) = polar_stretch(&tags) else { panic!("a polar stretch action") };
         let ints: usize = vertices.iter().map(|(_, v)| v.len()).sum();
         assert!(ints <= 16 * tags.len() + 1024, "{ints}");
     }
