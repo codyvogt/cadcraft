@@ -129,11 +129,19 @@ pub fn reference(d: &Drawing, insert: Handle) -> Option<Reference> {
     let target = data.tags.iter().find(|t| t.code == 340).and_then(|t| Handle::parse_hex(&t.value))?;
     let (kind, name) = d.foreign.targets.get(&target)?;
     let definition = d.block(name).filter(|_| kind == "BLOCK_RECORD")?.name.clone();
-    dynamic_block(d, &definition)?;
+    let m = dynamic_block(d, &definition)?;
     let mut values = BTreeMap::new();
     let cache = entry(&objects, rep, "AppDataCache").and_then(|c| entry(&objects, c, "ACAD_ENHANCEDBLOCKDATA"));
     for (key, h) in cache.map(|c| entries(&objects, c)).unwrap_or_default().into_iter().take(MAX_VALUES) {
         if let (Ok(node), Some(v)) = (key.trim().parse::<i32>(), objects.get(&h).and_then(|o| value(o))) {
+            // The record's groups alone can't tell a flip from another two-point parameter (a stray
+            // 70, or a flip without its state): the parameter it belongs to decides.
+            let flip = m.parameters.iter().any(|p| p.node == node && matches!(p.kind, ParameterKind::Flip { .. }));
+            let v = match (flip, v) {
+                (false, Value::Flip { base, end, .. }) => Value::Points { base, end },
+                (true, Value::Points { base, end }) => Value::Flip { base, end, flipped: false },
+                (_, v) => v,
+            };
             values.insert(node, v);
         }
     }

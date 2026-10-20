@@ -7,9 +7,11 @@
 //! rotate action, Flip state1 (reflection line from the origin to (-10, 0)) and its flip action,
 //! and Position1 at (0, 3) with a move action.
 
-use cadcraft_doc::dynblock::{ActionKind, GripPart, GripShape, ParameterKind, custom_properties, drag_grip, dynamic_block, grips, set_property};
+use cadcraft_doc::dynblock::{
+    ActionKind, GripPart, GripShape, ParameterKind, Value, custom_properties, drag_grip, dynamic_block, grips, reference, set_property,
+};
 use cadcraft_doc::geom::{Vec2, Vec3};
-use cadcraft_doc::{Drawing, EntityKind, Handle};
+use cadcraft_doc::{Drawing, EntityKind, Handle, RawTag};
 use cadcraft_io::{read_dxf, write_dxf};
 
 fn dxf(src: &str) -> String {
@@ -190,4 +192,37 @@ fn bad_angles_and_states_change_nothing() {
         assert!(set_property(&mut d, r, name, value).is_err(), "{name}={value}");
     }
     assert_eq!(d, before);
+}
+
+/// The saved value record of parameter `node` on the reference (the XRECORD its
+/// `ACAD_ENHANCEDBLOCKDATA` entry names), as its index in the drawing's kept objects.
+fn record(d: &Drawing, node: i32) -> usize {
+    let objects = &d.foreign.objects;
+    let after = |o: &cadcraft_doc::foreign::ForeignObject, key: &str| {
+        let i = o.tags.iter().position(|t| t.code == 3 && t.value == key)?;
+        Handle::parse_hex(&o.tags.get(i + 1)?.value)
+    };
+    let cache = objects.iter().find_map(|o| after(o, "ACAD_ENHANCEDBLOCKDATA")).unwrap();
+    let dict = objects.iter().find(|o| o.handle == cache).unwrap();
+    let h = after(dict, &node.to_string()).unwrap();
+    objects.iter().position(|o| o.handle == h).unwrap()
+}
+
+#[test]
+fn a_value_record_takes_its_shape_from_its_parameter() {
+    let (mut d, r) = symbol();
+    set_property(&mut d, r, "Angle1", "30").unwrap();
+    set_property(&mut d, r, "Flip state1", "Flipped").unwrap();
+    let mut again = read_dxf(write_dxf(&d).as_bytes()).unwrap();
+    // A stray group 70 after the rotation's points, and a flip record without its state.
+    let rot = record(&again, 15);
+    std::sync::Arc::make_mut(&mut again.foreign).objects[rot].tags.push(RawTag { code: 70, value: "1".into() });
+    let flip = record(&again, 20);
+    let tags = &mut std::sync::Arc::make_mut(&mut again.foreign).objects[flip].tags;
+    let last70 = tags.iter().rposition(|t| t.code == 70).unwrap();
+    tags.remove(last70);
+    let values = reference(&again, r).unwrap().values;
+    assert!(matches!(values.get(&15), Some(Value::Points { .. })), "{:?}", values.get(&15));
+    assert!(matches!(values.get(&20), Some(Value::Flip { flipped: false, .. })), "{:?}", values.get(&20));
+    assert_eq!(props(&again, r)[..2], pairs(&[("Angle1", "30"), ("Flip state1", "Not flipped")]));
 }
