@@ -30,7 +30,8 @@ pub(super) fn run_grip(s: &mut Session, p: &Value) -> Result<Value> {
         .and_then(Value::as_i64)
         .and_then(|n| i32::try_from(n).ok())
         .ok_or_else(|| bad(cmd, "`node` (a parameter's graph id) is required"))?;
-    let part = str_param(p, "part").and_then(GripPart::from_name).ok_or_else(|| bad(cmd, "`part` must be base, end or at"))?;
+    let part =
+        str_param(p, "part").and_then(GripPart::from_name).ok_or_else(|| bad(cmd, "`part` must be base, end, at, basex-endy or basey-endx"))?;
     let to = point_param(p, "to").ok_or_else(|| bad(cmd, "`to` [x, y] is required"))?;
     drag(s, h, node, part, to).map_err(|e| bad(cmd, e))?;
     let properties = dynblock::custom_properties(s.doc()?, h).map(|(_, p)| p).unwrap_or_default();

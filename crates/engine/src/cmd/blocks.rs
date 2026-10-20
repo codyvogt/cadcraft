@@ -66,7 +66,7 @@ pub fn specs() -> Vec<CommandSpec> {
             .enabled(has_doc)
             .noundo(),
         CommandSpec::new("blocks.reference.grip", "Drag Dynamic Grip", dyngrip::run_grip)
-            .params("{handle, node (the parameter's graph id), part: base|end|at, to: [x,y] (drawing coordinates)} → {properties}: a distance's arrow changes the distance (snapped to its values), a position's square moves it, a rotation's circle turns its angle")
+            .params("{handle, node (the parameter's graph id), part: base|end|at|basex-endy|basey-endx, to: [x,y] (drawing coordinates)} → {properties}: a distance's arrow changes the distance (snapped to its values), a position's square moves it, a rotation's circle turns its angle, a polar or XY parameter's squares move its base, end or corners")
             .enabled(has_doc),
         CommandSpec::new("purge", "Purge", purge::run)
             .alias(&["pu", "-purge"])

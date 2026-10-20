@@ -277,6 +277,27 @@ pub fn custom_properties(d: &Drawing, insert: Handle) -> Option<(String, Vec<Cus
                 let choices = if values.is_list() { values.list.iter().map(|x| number(d, x * sx)).collect() } else { Vec::new() };
                 out.push(CustomProperty { name: label.clone(), value: number(d, (e - b).len() * sx), choices, editable: true });
             }
+            // The distance from the base to the end, and the end's direction (AutoCAD measures it
+            // from the block's X axis, not from where the dynamic block has it).
+            ParameterKind::Polar { base: b, end: e, label, angle_label, values, .. } => {
+                let (b, e) = match v {
+                    Some(Value::Points { base, end }) => (*base, *end),
+                    _ => (*b, *e),
+                };
+                let choices = if values.is_list() { values.list.iter().map(|x| number(d, x * sx)).collect() } else { Vec::new() };
+                out.push(CustomProperty { name: label.clone(), value: number(d, (e - b).len() * sx), choices, editable: true });
+                let a = (e - b).xy().angle().rem_euclid(std::f64::consts::TAU);
+                out.push(CustomProperty { name: angle_label.clone(), value: angle_text(d, a), choices: Vec::new(), editable: true });
+            }
+            // How far the end is from the base along X and along Y.
+            ParameterKind::Xy { base: b, end: e, x_label, y_label, .. } => {
+                let (b, e) = match v {
+                    Some(Value::Points { base, end }) => (*base, *end),
+                    _ => (*b, *e),
+                };
+                out.push(CustomProperty { name: x_label.clone(), value: number(d, (e.x - b.x) * sx), choices: Vec::new(), editable: true });
+                out.push(CustomProperty { name: y_label.clone(), value: number(d, (e.y - b.y) * sy), choices: Vec::new(), editable: true });
+            }
             ParameterKind::Point { at, label, .. } => {
                 let at = match v {
                     Some(Value::Point { at }) => *at,

@@ -28,6 +28,10 @@ pub enum GripPart {
     End,
     /// A one-point parameter's point (a position, a visibility or lookup grip).
     At,
+    /// An XY parameter's corner at the base's X and the end's Y.
+    BaseXEndY,
+    /// An XY parameter's corner at the end's X and the base's Y.
+    BaseYEndX,
 }
 
 impl GripPart {
@@ -36,6 +40,8 @@ impl GripPart {
             GripPart::Base => "base",
             GripPart::End => "end",
             GripPart::At => "at",
+            GripPart::BaseXEndY => "basex-endy",
+            GripPart::BaseYEndX => "basey-endx",
         }
     }
     pub fn from_name(s: &str) -> Option<GripPart> {
@@ -43,6 +49,8 @@ impl GripPart {
             "base" => Some(GripPart::Base),
             "end" => Some(GripPart::End),
             "at" => Some(GripPart::At),
+            "basex-endy" => Some(GripPart::BaseXEndY),
+            "basey-endx" => Some(GripPart::BaseYEndX),
             _ => None,
         }
     }
@@ -237,6 +245,35 @@ pub fn grips(d: &Drawing, insert: Handle) -> Vec<DynGrip> {
                         property: label.clone(),
                         choices: states.to_vec(),
                     });
+                }
+            }
+            // Squares at the base and the end (a polar parameter), and at the two other corners of
+            // the rectangle they span (an XY parameter), for the grips the parameter has; an end
+            // no action follows has none.
+            ParameterKind::Polar { base, end, label, .. } | ParameterKind::Xy { base, end, x_label: label, .. } => {
+                let (b, e) = match r.values.get(&p.node) {
+                    Some(Value::Points { base, end }) => (*base, *end),
+                    _ => (*base, *end),
+                };
+                let used = ends_used(&m, p.node).map_or([true, true], |(base, end)| [base, end]);
+                let mut corners = vec![(0, GripPart::Base, b, used[0]), (1, GripPart::End, e, used[1])];
+                if matches!(p.kind, ParameterKind::Xy { .. }) {
+                    let both = used[0] && used[1];
+                    corners.push((2, GripPart::BaseXEndY, Vec3::new(b.x, e.y, b.z), both));
+                    corners.push((3, GripPart::BaseYEndX, Vec3::new(e.x, b.y, b.z), both));
+                }
+                for (i, part, at, used) in corners {
+                    if used && shown(p.node, grip(i)) {
+                        out.push(DynGrip {
+                            node: p.node,
+                            part,
+                            shape: GripShape::Point,
+                            at: world(at),
+                            dir: Vec2::ZERO,
+                            property: label.clone(),
+                            choices: Vec::new(),
+                        });
+                    }
                 }
             }
             ParameterKind::Point { at, label, .. } => {
