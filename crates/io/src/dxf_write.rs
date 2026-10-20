@@ -1831,15 +1831,14 @@ fn tags_for(d: &Drawing, version: Version, target: Version) -> Vec<Tag> {
     };
     for st in &all_spaces {
         for e in st.iter() {
-            if contexts && crate::dxf_anno::has_contexts(e) {
+            // Only dimensions have a block per scale (text and multileaders have none).
+            if contexts && matches!(e.kind, EntityKind::Dimension(_)) && crate::dxf_anno::has_contexts(e) {
                 let (scales, default) = crate::dxf_anno::scales(d, e);
                 let mut names = Vec::new();
                 for s in &scales {
                     let at = crate::dxf_anno::at_scale(e, s.factor());
-                    let ents = match &at.kind {
-                        EntityKind::Dimension(sdm) => dim_block_entities(d, sdm, &e.common.layer),
-                        _ => Vec::new(),
-                    };
+                    let EntityKind::Dimension(sdm) = &at.kind else { continue };
+                    let ents = dim_block_entities(d, sdm, &e.common.layer);
                     let name = fresh_dim_name(&mut n);
                     dim_defs.push((name.clone(), w.h(), ents));
                     names.push(name);
