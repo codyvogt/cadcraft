@@ -8,9 +8,9 @@
 //! `AcDbBlockRepresentation` data holds its values (created when it had none) and its history
 //! says what was done to it (AutoCAD replays the history when the dynamic block is redefined).
 //!
-//! What can change so far: a visibility state, a lookup value, a distance and a position, with
-//! the stretch and move actions they drive and the lookups that follow. The other parameters'
-//! actions come later.
+//! What can change: a visibility state, a lookup value, a distance (linear, polar or XY), an angle,
+//! a position and a flip state, with the stretch, move, rotate, flip, scale and array actions they
+//! drive and the lookups that follow.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -734,14 +734,15 @@ impl ActionRun<'_> {
     }
 
     /// Action `a`, when one of its connections follows a parameter the change sets.
-    fn action(&mut self, a: &super::Action) {
+    fn action(&mut self, a: &super::Action) -> Result<(), String> {
         if !a.connections.iter().any(|(n, _)| self.set.contains_key(n)) {
-            return;
+            return Ok(());
         }
-        match turn_or_mirror(self.m, self.values, self.set, a) {
-            Some(t) => self.turn_or_mirror(a, t),
+        match transform_of(self.m, self.values, self.set, a)? {
+            Some(t) => self.transform(a, t),
             None => self.stretch(a),
         }
+        Ok(())
     }
 
     /// Arrays, made again from the first copy of each arrayed object for the parameter's value now
@@ -772,10 +773,10 @@ impl ActionRun<'_> {
         Ok(arrays)
     }
 
-    /// A rotate or flip action turns or mirrors its objects, and carries the parameters in its
-    /// selection the same way. A handle the selection repeats is handled once (twice would turn it
-    /// twice, or mirror it back).
-    fn turn_or_mirror(&mut self, a: &super::Action, t: Mat3) {
+    /// A rotate, flip or scale action turns, mirrors or scales its objects, and carries the
+    /// parameters in its selection the same way. A handle the selection repeats is handled once
+    /// (twice would turn or scale it twice, or mirror it back).
+    fn transform(&mut self, a: &super::Action, t: Mat3) {
         let mut handled: HashSet<Handle> = HashSet::new();
         for h in &a.selection {
             if !handled.insert(*h) {
@@ -918,7 +919,7 @@ fn apply(
         moves: HashMap::new(),
     };
     for a in &m.actions {
-        run.action(a);
+        run.action(a)?;
     }
     let arrays = run.arrays()?;
     let earlier = earlier_copies(&src, &src_tag, &arrays);
@@ -1522,25 +1523,93 @@ fn set_state(tags: &mut Vec<RawTag>, on: bool) {
     }
 }
 
-/// The turn or mirror action `a` makes with the changes `set`, if it is one and they change it:
-/// a rotate action turns about its base point by the change of its rotation parameter's angle;
-/// a flip action mirrors across its flip parameter's reflection line when the state changes.
-fn turn_or_mirror(m: &DynamicBlock, values: &BTreeMap<i32, Value>, set: &BTreeMap<i32, Val>, a: &super::Action) -> Option<Mat3> {
-    match &a.kind {
+/// The transform action `a` makes with the changes `set`, if it is one and they change it: a
+/// rotate action turns about its base point by the change of its rotation parameter's angle; a flip
+/// action mirrors across its flip parameter's reflection line when the state changes; a scale
+/// action scales about its base point by how much its distances grew.
+fn transform_of(m: &DynamicBlock, values: &BTreeMap<i32, Value>, set: &BTreeMap<i32, Val>, a: &super::Action) -> Result<Option<Mat3>, String> {
+    Ok(match &a.kind {
         ActionKind::Rotate { base } => {
-            let (node, _) = a.connections.iter().find(|(_, c)| c.eq_ignore_ascii_case("AngleDelta"))?;
-            let (Some(Val::Points(nb, ne)), Some(Val::Points(ob, oe))) = (set.get(node), current(m, values, *node)) else { return None };
+            let Some((node, _)) = a.connections.iter().find(|(_, c)| c.eq_ignore_ascii_case("AngleDelta")) else { return Ok(None) };
+            let (Some(Val::Points(nb, ne)), Some(Val::Points(ob, oe))) = (set.get(node), current(m, values, *node)) else { return Ok(None) };
             let turn = (*ne - *nb).xy().angle() - (oe - ob).xy().angle();
             let pivot = if base.dependent { *nb + base.offset } else { base.at };
             (turn.abs() > 1e-12 && turn.is_finite()).then(|| Mat3::rotate_about(pivot.xy(), turn))
         }
         ActionKind::Flip => {
-            let (node, _) = a.connections.first()?;
-            let (Some(Val::Flip(b, e, now)), Some(Val::Flip(_, _, was))) = (set.get(node), current(m, values, *node)) else { return None };
+            let Some((node, _)) = a.connections.first() else { return Ok(None) };
+            let (Some(Val::Flip(b, e, now)), Some(Val::Flip(_, _, was))) = (set.get(node), current(m, values, *node)) else { return Ok(None) };
             (now != &was && (*e - *b).len() > 1e-12).then(|| Mat3::mirror(b.xy(), e.xy()))
         }
+        ActionKind::Scale { base } => scale_of(m, values, set, a, base)?,
         _ => None,
+    })
+}
+
+/// The scale factors one change of a scale action may make: past them the objects would vanish
+/// or their sizes overflow.
+const MIN_SCALE: f64 = 1e-9;
+const MAX_SCALE: f64 = 1e9;
+
+/// A scale action's transform for the changes `set`: each axis scales by the ratio of the new
+/// distance it reads to the old one (a linear or polar parameter's distance; an XY parameter's
+/// horizontal distance for "XScale", vertical for "YScale", both for "Scale"), about the base point,
+/// which follows the parameter's base point when the action says so.
+fn scale_of(
+    m: &DynamicBlock,
+    values: &BTreeMap<i32, Value>,
+    set: &BTreeMap<i32, Val>,
+    a: &super::Action,
+    base: &super::ActionBase,
+) -> Result<Option<Mat3>, String> {
+    // The ratio connection `name` reads, when its parameter changed; `None` when it didn't.
+    let ratio = |name: &str| -> Result<Option<(f64, f64)>, String> {
+        let Some((node, _)) = a.connections.iter().find(|(n, c)| *n != 0 && c.eq_ignore_ascii_case(name)) else { return Ok(None) };
+        let (Some(Val::Points(nb, ne)), Some(Val::Points(ob, oe))) = (set.get(node), current(m, values, *node)) else { return Ok(None) };
+        let Some(p) = m.parameters.iter().find(|p| p.node == *node) else { return Ok(None) };
+        let (now, was) = ((*ne - *nb).xy(), (oe - ob).xy());
+        let r = |n: f64, w: f64| -> Result<f64, String> {
+            let r = n.abs() / w.abs();
+            if w.abs() < 1e-12 || !r.is_finite() {
+                // From nothing no ratio is known: AutoCAD can't scale back up from zero either.
+                return Err(format!("{} can't scale objects from a distance of 0.", a.name));
+            }
+            Ok(r)
+        };
+        Ok(Some(match (&p.kind, name.to_ascii_lowercase().as_str()) {
+            (ParameterKind::Xy { .. }, "xscale") => (r(now.x, was.x)?, 1.0),
+            (ParameterKind::Xy { .. }, "yscale") => (1.0, r(now.y, was.y)?),
+            (ParameterKind::Xy { .. }, _) => (r(now.x, was.x)?, r(now.y, was.y)?),
+            _ => {
+                let s = r(now.len(), was.len())?;
+                (s, s)
+            }
+        }))
+    };
+    // Independent axes when the X and Y connections read different values of an XY parameter;
+    // else the one factor.
+    let (x, y) = (ratio("XScale")?, ratio("YScale")?);
+    let (sx, sy) = match (x, y, ratio("Scale")?) {
+        (Some((sx, _)), Some((_, sy)), _) if x != y => (sx, sy),
+        (_, _, Some(s)) => s,
+        (Some(s), _, _) | (None, Some(s), _) => s,
+        (None, None, None) => return Ok(None),
+    };
+    if (sx - 1.0).abs() < 1e-12 && (sy - 1.0).abs() < 1e-12 {
+        return Ok(None);
     }
+    if !(sx >= MIN_SCALE && sy >= MIN_SCALE) {
+        return Err(format!("{} would scale objects to nothing.", a.name));
+    }
+    if !(sx <= MAX_SCALE && sy <= MAX_SCALE) {
+        return Err(format!("{} would scale objects more than {MAX_SCALE} times.", a.name));
+    }
+    let pivot = match a.connections.first().and_then(|(n, _)| set.get(n).cloned().or_else(|| current(m, values, *n))) {
+        Some(Val::Points(b, _)) if base.dependent => b + base.offset,
+        _ => base.at,
+    };
+    let p = pivot.xy();
+    Ok(Some(Mat3::translate(p * -1.0).then(Mat3::scale(sx, sy)).then(Mat3::translate(p))))
 }
 
 /// One change to a copied object: a move (of the listed vertices, else all of it) or a turn or

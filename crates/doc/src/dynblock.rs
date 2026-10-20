@@ -250,7 +250,13 @@ pub enum ActionKind {
         multiplier: f64,
         angle_offset: f64,
     },
-    Scale,
+    /// Scales the objects about its base point by how much the distances it follows grew: a
+    /// distance's (linear or polar parameter) for both axes, or an XY parameter's horizontal and
+    /// vertical distances for each axis on its own. Its connections name what each reads ("Scale",
+    /// "XScale", "YScale").
+    Scale {
+        base: ActionBase,
+    },
     /// Turns the objects about its base point by the change of a rotation parameter's angle.
     Rotate {
         base: ActionBase,
@@ -573,7 +579,16 @@ fn action(handle: Handle, node: i32, name: String, kind: &str, secs: &[(&str, &[
             let (multiplier, angle_offset) = (c.real(140), c.real(141));
             (two_connections(tags), ActionKind::Move { multiplier, angle_offset })
         }
-        "BLOCKSCALEACTION" => (Vec::new(), ActionKind::Scale),
+        // The base point's two connections (as a rotate action's), then the scale's three: the
+        // parameters (94-96) and what each reads (303-305, "Scale", "XScale", "YScale").
+        "BLOCKSCALEACTION" => {
+            let with_base = section(secs, "AcDbBlockActionWithBasePt");
+            let mut connections = two_connections(with_base);
+            let tags = section(secs, "AcDbBlockScaleAction");
+            let first = |code: i32| Cursor::new(tags).next(code).unwrap_or_default().to_string();
+            connections.extend((0..3).map(|i| (first(94 + i).trim().parse().unwrap_or(0), first(303 + i))));
+            (connections, ActionKind::Scale { base: action_base(with_base) })
+        }
         "BLOCKROTATEACTION" => {
             let mut connections = two_connections(section(secs, "AcDbBlockActionWithBasePt"));
             let mut c = Cursor::new(section(secs, "AcDbBlockRotationAction"));
