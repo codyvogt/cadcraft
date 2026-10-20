@@ -168,7 +168,11 @@ pub(super) fn angle_from_shown(d: &Drawing, v: f64) -> f64 {
 
 fn angle_text(d: &Drawing, a: f64) -> String {
     let prec = usize::try_from(d.header.i64("AUPREC", 0).clamp(0, 8)).unwrap_or(0);
-    format!("{:.prec$}", angle_shown(d, a).to_degrees())
+    // Rounded to the shown decimals first: an angle just short of a full turn shows as 0, not 360.
+    let step = 10f64.powi(i32::try_from(prec).unwrap_or(0));
+    let shown = (angle_shown(d, a).to_degrees() * step).round() / step;
+    let shown = if shown >= 360.0 { shown - 360.0 } else { shown };
+    format!("{:.prec$}", shown + 0.0)
 }
 
 /// A number as the drawing shows lengths (LUPREC decimals).
@@ -354,4 +358,21 @@ fn lookup_sets_what_changes(m: &DynamicBlock, node: i32) -> bool {
         }
     }
     any
+}
+
+#[cfg(test)]
+mod tests {
+    use super::angle_text;
+    use crate::Drawing;
+
+    #[test]
+    fn an_angle_just_short_of_a_full_turn_shows_as_zero() {
+        let mut d = Drawing::new_imperial();
+        d.header.set_i64("AUPREC", 0);
+        assert_eq!(angle_text(&d, 359.7f64.to_radians()), "0");
+        assert_eq!(angle_text(&d, 359.4f64.to_radians()), "359");
+        d.header.set_i64("AUPREC", 2);
+        assert_eq!(angle_text(&d, 359.996f64.to_radians()), "0.00");
+        assert_eq!(angle_text(&d, 90f64.to_radians()), "90.00");
+    }
 }
