@@ -19,7 +19,6 @@ use crate::{Accept, EngineError, Input, Interactive, Prompt, Result, Session, St
 pub(super) fn specs() -> Vec<CommandSpec> {
     vec![
         CommandSpec::new("bparameter", "Parameter", run_bparameter)
-            .menu(&["Tools", "Block Editor", "Parameter"])
             .alias(&["-bparameter"])
             .params(
                 "{type: \"linear\"|\"point\", linear: start: [x,y], end: [x,y], labelAt?: [x,y] (where the label goes; default on the line); point: at: [x,y], labelAt?: [x,y]; label?: property name (default Distance1/Position1…), grips?: 0|1|2 (linear, default 2) or 0|1 (point, default 1)} → {node, element, label} (editor coordinates)",
@@ -27,7 +26,6 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             .enabled(authoring)
             .interactive(|_| Ok(Box::new(BparameterM::default()))),
         CommandSpec::new("baction", "Action", run_baction)
-            .menu(&["Tools", "Block Editor", "Action"])
             .alias(&["-baction"])
             .params(
                 "{parameter: graph id or property name (\"Distance1\"), type: \"stretch\"|\"move\", point?: \"start\"|\"second\" (which end of a linear parameter it follows, default second), handles: [objects], frame?: [[x,y],[x,y]] (stretch: corners) | polygon?: [[x,y]…] (stretch: a crossing polygon), at?: [x,y] (where the action shows; default the parameter's point)} → {node, name} (editor coordinates)",
