@@ -411,7 +411,9 @@ fn finite(p: Vec3) -> bool {
 pub fn add_parameter(d: &mut Drawing, name: &str, spec: &ParameterSpec) -> Result<i32, String> {
     match spec {
         ParameterSpec::Linear { base, end, label, label_offset, grips } => {
-            if !finite(*base) || !finite(*end) || !label_offset.is_finite() {
+            // Two finite points far apart can still be infinitely far from each other, and the
+            // direction is written into the grips.
+            if !finite(*base) || !finite(*end) || !finite(*end - *base) || !label_offset.is_finite() {
                 return Err("Invalid point.".into());
             }
             if (*end - *base).len() <= 1e-9 {

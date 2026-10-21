@@ -262,6 +262,7 @@ fn bad_authoring_is_refused_and_changes_nothing() {
         ParameterSpec::Linear { base: v(1.0, 1.0), end: v(1.0, 1.0), label: None, label_offset: 0.0, grips: 2 },
         ParameterSpec::Linear { base: v(f64::NAN, 0.0), end: v(1.0, 1.0), label: None, label_offset: 0.0, grips: 2 },
         ParameterSpec::Linear { base: v(0.0, 0.0), end: v(1.0, 1.0), label: None, label_offset: f64::INFINITY, grips: 2 },
+        ParameterSpec::Linear { base: v(1e308, 0.0), end: v(-1e308, 0.0), label: None, label_offset: 0.0, grips: 2 },
         ParameterSpec::Linear { base: v(0.0, 0.0), end: v(1.0, 1.0), label: None, label_offset: 0.0, grips: 3 },
         ParameterSpec::Point { at: v(0.0, 0.0), label: None, label_at: v(0.0, 0.0), grips: 2 },
     ];

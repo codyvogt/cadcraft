@@ -132,6 +132,7 @@ fn hostile_authoring_params_never_panic() {
         json!({ "type": "linear" }),
         json!({ "type": "linear", "start": [0, 0], "end": [0, 0] }),
         json!({ "type": "linear", "start": [1e308, 0], "end": [-1e308, 0], "labelAt": [1e308, 1e308] }),
+        json!({ "type": "linear", "start": [1e308, 0], "end": [-1e308, 0] }),
         json!({ "type": "linear", "start": [0, 0], "end": [1, 0], "grips": 3 }),
         json!({ "type": "linear", "start": [0, 0], "end": [1, 0], "grips": -1 }),
         json!({ "type": "point", "at": "nan,nan" }),
@@ -140,6 +141,8 @@ fn hostile_authoring_params_never_panic() {
     ] {
         let _ = s.execute("bparameter", &p);
     }
+    let far = s.execute("bparameter", &json!({ "type": "linear", "start": [1e308, 0], "end": [-1e308, 0] }));
+    assert!(far.is_err(), "an infinite distance between finite points is refused: {far:?}");
     s.execute("bparameter", &json!({ "type": "linear", "start": [0, 0], "end": [10, 0] })).unwrap();
     let many: Vec<Value> = (0..20_001).map(|_| r.clone()).collect();
     let poly: Vec<[f64; 2]> = (0..20_001).map(|i| [i as f64, (i % 2) as f64]).collect();
