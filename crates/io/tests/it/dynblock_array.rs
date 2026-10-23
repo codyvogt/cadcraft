@@ -27,7 +27,7 @@ fn dxf(src: &str) -> String {
 
 /// The fixture with a reference to `block` at (100, 100).
 fn reference(block: &str) -> (Drawing, Handle) {
-    let mut d = read_dxf(dxf(&include_str!("data/dynblock_arrays.txt").replace("\r\n", "\n")).as_bytes()).unwrap();
+    let mut d = read_dxf(dxf(&include_str!("../data/dynblock_arrays.txt").replace("\r\n", "\n")).as_bytes()).unwrap();
     let ins = cadcraft_doc::Insert {
         block: block.into(),
         insert: Vec3::new(100.0, 100.0, 0.0),

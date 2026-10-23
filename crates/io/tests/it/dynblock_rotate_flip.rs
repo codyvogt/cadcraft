@@ -27,7 +27,7 @@ fn dxf(src: &str) -> String {
 
 /// Symbol and a reference to it at (100, 100) with its attribute.
 fn symbol() -> (Drawing, Handle) {
-    symbol_from(&include_str!("data/dynblock_symbol.txt").replace("\r\n", "\n"))
+    symbol_from(&include_str!("../data/dynblock_symbol.txt").replace("\r\n", "\n"))
 }
 
 /// As [`symbol`], from the fixture's text `src` (changed by a test).
@@ -153,7 +153,7 @@ fn a_rotation_grip_off_the_radius_stays_where_its_grip_object_is() {
     // The grip object a quarter turn round from the radius' end (as AutoCAD saves blocks whose
     // grip was moved there): the circle is drawn there and turns with the angle, and dragging
     // it turns the block by the cursor's turn, not to the cursor's direction.
-    let src = include_str!("data/dynblock_symbol.txt")
+    let src = include_str!("../data/dynblock_symbol.txt")
         .replace("\r\n", "\n")
         .replace("100 AcDbBlockGrip\n91 0\n92 0\n1010 2\n1020 0\n", "100 AcDbBlockGrip\n91 0\n92 0\n1010 0\n1020 2\n");
     let (mut d, r) = symbol_from(&src);
@@ -188,7 +188,7 @@ fn an_angle_shows_and_is_typed_as_the_drawing_measures_angles() {
 fn an_angle_by_increments_marks_its_stops_round_the_circle() {
     // Angle1 by 90° from 0 to a full turn: its grip stops at four points round the base, the
     // full turn being no turn; the way it travels there is round the circle.
-    let src = include_str!("data/dynblock_symbol.txt")
+    let src = include_str!("../data/dynblock_symbol.txt")
         .replace("\r\n", "\n")
         .replace("96 3\n141 0\n142 6.283185307179586\n143 0\n", "96 7\n141 0\n142 6.283185307179586\n143 1.5707963267948966\n");
     let (d, r) = symbol_from(&src);
@@ -211,7 +211,7 @@ fn an_angle_by_increments_marks_its_stops_round_the_circle() {
 fn an_angle_s_stops_follow_a_grip_off_the_radius() {
     // The grip object a quarter turn round and 90° increments: each stop is where the grip is
     // at that angle, the first (0) where it is now.
-    let src = include_str!("data/dynblock_symbol.txt")
+    let src = include_str!("../data/dynblock_symbol.txt")
         .replace("\r\n", "\n")
         .replace("96 3\n141 0\n142 6.283185307179586\n143 0\n", "96 7\n141 0\n142 6.283185307179586\n143 1.5707963267948966\n")
         .replace("100 AcDbBlockGrip\n91 0\n92 0\n1010 2\n1020 0\n", "100 AcDbBlockGrip\n91 0\n92 0\n1010 0\n1020 2\n");
@@ -270,7 +270,7 @@ fn a_value_record_takes_its_shape_from_its_parameter() {
 fn a_flip_selection_that_repeats_its_objects_mirrors_them_once() {
     // The flip action's selection lists the line, the circle and Position1 twice: each is mirrored
     // once, as with the selection listing them once (twice would mirror them back).
-    let src = include_str!("data/dynblock_symbol.txt").replace("\r\n", "\n");
+    let src = include_str!("../data/dynblock_symbol.txt").replace("\r\n", "\n");
     let once = "71 3\n330 31\n330 32\n330 68\n1010 -6";
     assert_eq!(src.matches(once).count(), 1);
     let (mut twice, r) = symbol_from(&src.replace(once, "71 6\n330 31\n330 32\n330 68\n330 31\n330 32\n330 68\n1010 -6"));

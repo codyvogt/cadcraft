@@ -21,7 +21,7 @@ fn dxf(src: &str) -> String {
 
 /// A session with Symbol and a reference to it at (100, 100).
 fn session() -> (Session, Handle) {
-    let src = include_str!("../../io/tests/data/dynblock_symbol.txt").replace("\r\n", "\n");
+    let src = include_str!("../../../io/tests/data/dynblock_symbol.txt").replace("\r\n", "\n");
     let d = cadcraft_io::read_dxf(dxf(&src).as_bytes()).unwrap();
     let mut s = Session::empty();
     s.open_drawing(d, "symbol", None);
