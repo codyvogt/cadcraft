@@ -34,7 +34,7 @@ fn dxf(src: &str) -> String {
 }
 
 fn fixture() -> Drawing {
-    read_dxf(dxf(&include_str!("data/dynblock_params.txt").replace("\r\n", "\n")).as_bytes()).unwrap()
+    read_dxf(dxf(&include_str!("../data/dynblock_params.txt").replace("\r\n", "\n")).as_bytes()).unwrap()
 }
 
 /// The fixture with a reference to `block` at (100, 100) turned by `rotation`.
@@ -262,7 +262,7 @@ fn a_lookup_sets_flips_xy_polar_and_positions() {
 
 #[test]
 fn a_lookup_cell_that_isnt_a_number_is_refused() {
-    let src = include_str!("data/dynblock_params.txt").replace("\r\n", "\n").replace("302 1.570796326794896", "302 up-ish");
+    let src = include_str!("../data/dynblock_params.txt").replace("\r\n", "\n").replace("302 1.570796326794896", "302 up-ish");
     let mut d = read_dxf(dxf(&src).as_bytes()).unwrap();
     let ins = cadcraft_doc::Insert {
         block: "Turn".into(),

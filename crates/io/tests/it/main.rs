@@ -23,6 +23,7 @@ mod dwg_roundtrip_losses;
 mod dwt_template;
 mod dxf_versions;
 mod dynblock_array;
+mod dynblock_params;
 mod dynblock_read;
 mod dynblock_rotate_flip;
 mod dynblock_scale_polar;

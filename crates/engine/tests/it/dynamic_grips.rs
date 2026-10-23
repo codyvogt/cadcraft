@@ -178,7 +178,7 @@ fn a_grip_with_a_value_list_marks_its_stops_while_dragged() {
 /// away from objects it only moves.
 #[test]
 fn an_alignment_grip_aligns_with_the_line_at_the_cursor() {
-    let src = include_str!("../../io/tests/data/dynblock_params.txt").replace("\r\n", "\n");
+    let src = include_str!("../../../io/tests/data/dynblock_params.txt").replace("\r\n", "\n");
     let d = cadcraft_io::read_dxf(dxf(&src).as_bytes()).unwrap();
     let mut s = Session::empty();
     s.open_drawing(d, "params", None);
