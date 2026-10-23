@@ -578,6 +578,12 @@ mod native {
         while let (Some(&code_line), Some(&value_line)) = (lines.get(i), lines.get(i + 1)) {
             let (code, value) = (code_line.trim(), value_line.trim_end_matches('\r'));
             if code == "0" {
+                // An opened multileader context body closes before the next record, as acadrust
+                // writes it.
+                if ml_open {
+                    out.push(format!("301{}", eol(code_line)));
+                    out.push(format!("}}{}", eol(value_line)));
+                }
                 let kind = value.trim();
                 marker = KINDS.iter().find(|(k, _)| *k == kind).map(|(_, m)| *m);
                 dim = is_dim(kind);
@@ -652,7 +658,11 @@ mod native {
         // interrupted once it starts (CWE-789). This bounds the large-input variant; the decoder
         // runs inside `catch_unwind` so a decode failure is reported rather than crashing.
         if dxf.len() > Limits::DEFAULT.max_dxf_bytes {
-            return Err(format!("DXF: the input is {}, larger than the {} CADCraft converts to DWG", mb(dxf.len() as u64), mb(Limits::DEFAULT.max_dxf_bytes as u64)));
+            return Err(format!(
+                "DXF: the input is {}, larger than the {} CADCraft converts to DWG",
+                mb(dxf.len() as u64),
+                mb(Limits::DEFAULT.max_dxf_bytes as u64)
+            ));
         }
         let data = contexts(dxf, true);
         let mut doc = std::panic::catch_unwind(move || acadrust::DxfReader::from_reader(Cursor::new(data)).and_then(|r| r.read()))
@@ -737,6 +747,21 @@ pub fn dxf_to_dwg_as(_dxf: &[u8], _version: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A multileader context read by acadrust has its body between `300 CONTEXT_DATA{` and
+    /// `301 }`, closed before the next record; back as AutoCAD writes it, both go.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_multileader_context_body_is_closed() {
+        let ours = "  0\nACDB_MLEADEROBJECTCONTEXTDATA_CLASS\n  5\n90\n340\n51\n 40\n1\n  0\nENDSEC\n";
+        let theirs = String::from_utf8(native::contexts(ours.as_bytes(), true)).unwrap();
+        let lines: Vec<&str> = theirs.lines().map(str::trim).collect();
+        let open = lines.iter().position(|l| *l == "CONTEXT_DATA{").unwrap();
+        let close = lines.iter().position(|l| *l == "}").unwrap();
+        let next = lines.iter().position(|l| *l == "ENDSEC").unwrap();
+        assert!(open < close && close < next && lines.get(close - 1) == Some(&"301"), "{theirs}");
+        assert_eq!(String::from_utf8(native::contexts(theirs.as_bytes(), false)).unwrap(), ours);
+    }
 
     #[test]
     fn detects_magic() {
