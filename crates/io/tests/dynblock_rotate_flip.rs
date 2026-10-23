@@ -226,3 +226,20 @@ fn a_value_record_takes_its_shape_from_its_parameter() {
     assert!(matches!(values.get(&20), Some(Value::Flip { flipped: false, .. })), "{:?}", values.get(&20));
     assert_eq!(props(&again, r)[..2], pairs(&[("Angle1", "30"), ("Flip state1", "Not flipped")]));
 }
+
+#[test]
+fn a_flip_selection_that_repeats_its_objects_mirrors_them_once() {
+    // The flip action's selection lists the line, the circle and Position1 twice: each is mirrored
+    // once, as with the selection listing them once (twice would mirror them back).
+    let src = include_str!("data/dynblock_symbol.txt").replace("\r\n", "\n");
+    let once = "71 3\n330 31\n330 32\n330 68\n1010 -6";
+    assert_eq!(src.matches(once).count(), 1);
+    let (mut twice, r) = symbol_from(&src.replace(once, "71 6\n330 31\n330 32\n330 68\n330 31\n330 32\n330 68\n1010 -6"));
+    let (mut plain, _) = symbol();
+    for d in [&mut twice, &mut plain] {
+        set_property(d, r, "Flip state1", "Flipped").unwrap();
+    }
+    let ((l1, a1, r1), (l2, a2, r2)) = (shown(&twice, r), shown(&plain, r));
+    assert!(near(l1, (l2.x, l2.y)) && near(a1, (a2.x, a2.y)) && (r1 - r2).abs() < 1e-9, "{l1:?} {l2:?}");
+    assert_eq!(props(&twice, r), props(&plain, r));
+}
