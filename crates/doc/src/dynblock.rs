@@ -244,10 +244,9 @@ pub enum ActionKind {
     Lookup { columns: Vec<LookupColumn>, rows: Vec<Vec<String>> },
     /// Moves the objects by the change of the parameter values it follows.
     Move { multiplier: f64, angle_offset: f64 },
-    /// Scales the objects about its base point by how much the distances it follows grew: a
-    /// distance's (linear or polar parameter) for both axes, or an XY parameter's horizontal and
-    /// vertical distances for each axis on its own. Its connections name what each reads ("Scale",
-    /// "XScale", "YScale").
+    /// Scales the objects about its base point by how much the distance it follows grew (a linear
+    /// or polar parameter's distance, an XY parameter's diagonal). Its connections name what each
+    /// reads ("Scale", "XScale", "YScale").
     Scale { base: ActionBase },
     /// Turns the objects about its base point by the change of a rotation parameter's angle.
     Rotate { base: ActionBase },
