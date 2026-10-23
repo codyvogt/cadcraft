@@ -99,12 +99,12 @@ impl Prompt {
         self.grip = Some(g);
         self
     }
-    /// The visual chooser the UI can show (the `picker` field).
     /// An angle about the base is asked for (the `angle` field).
     pub fn angle(mut self) -> Self {
         self.angle = true;
         self
     }
+    /// The visual chooser the UI can show (the `picker` field).
     pub fn picker(mut self, p: Picker) -> Self {
         self.picker = Some(p);
         self
