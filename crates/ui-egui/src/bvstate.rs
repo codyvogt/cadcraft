@@ -174,7 +174,7 @@ pub fn dialog(app: &mut CadApp, ctx: &egui::Context, open: &mut bool) {
     let mut st = std::mem::take(&mut app.bvstate);
     let modal = st.new.is_some();
     egui::Window::new(crate::tl!("Visibility States"))
-        .id(egui::Id::new("Visibility States"))
+        .id(egui::Id::unique("Visibility States"))
         .open(open)
         .collapsible(false)
         .resizable(false)
@@ -300,7 +300,7 @@ fn new_dialog(ctx: &egui::Context, st: &mut State) {
     let (mut ok, mut cancel) = (false, false);
     let mut open = true;
     egui::Window::new(crate::tl!("New Visibility State"))
-        .id(egui::Id::new("New Visibility State"))
+        .id(egui::Id::unique("New Visibility State"))
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
