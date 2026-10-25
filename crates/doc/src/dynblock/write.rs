@@ -73,41 +73,44 @@ pub enum ActionSpec {
 /// One node of the evaluation graph: its index, flags, graph id, object and the first and last
 /// of its incoming and outgoing edges (edge indices, -1 for none).
 #[derive(Clone, Debug, PartialEq)]
-struct Node {
-    index: i32,
-    flags: i32,
-    id: i32,
-    handle: Handle,
-    links: [i32; 4],
+pub(super) struct Node {
+    pub(super) index: i32,
+    pub(super) flags: i32,
+    pub(super) id: i32,
+    pub(super) handle: Handle,
+    pub(super) links: [i32; 4],
 }
 
 /// One edge: its index, flags, kind (1 from a parameter, 2 from a grip), the nodes it joins
 /// (indices) and its neighbours in their lists: previous and next incoming of `to`, previous and
 /// next outgoing of `from`, then one more link AutoCAD leaves at -1.
 #[derive(Clone, Debug, PartialEq)]
-struct Edge {
-    index: i32,
-    flags: i32,
-    kind: i32,
-    from: i32,
-    to: i32,
-    links: [i32; 5],
+pub(super) struct Edge {
+    pub(super) index: i32,
+    pub(super) flags: i32,
+    pub(super) kind: i32,
+    pub(super) from: i32,
+    pub(super) to: i32,
+    pub(super) links: [i32; 5],
 }
 
 /// An evaluation graph object being extended.
-struct Graph {
-    handle: Handle,
+pub(super) struct Graph {
+    pub(super) handle: Handle,
     /// Its groups before `100 AcDbEvalGraph`, as they were.
-    head: Vec<RawTag>,
-    nodes: Vec<Node>,
-    edges: Vec<Edge>,
+    pub(super) head: Vec<RawTag>,
+    /// The highest graph id handed out (96, 97), which AutoCAD keeps after nodes are erased:
+    /// ids aren't used again.
+    pub(super) last_id: i32,
+    pub(super) nodes: Vec<Node>,
+    pub(super) edges: Vec<Edge>,
 }
 
-fn tag(code: i32, value: impl ToString) -> RawTag {
+pub(super) fn tag(code: i32, value: impl ToString) -> RawTag {
     RawTag { code, value: value.to_string() }
 }
 
-fn real(code: i32, v: f64) -> RawTag {
+pub(super) fn real(code: i32, v: f64) -> RawTag {
     tag(code, format!("{v:?}"))
 }
 
@@ -118,11 +121,12 @@ fn point(out: &mut Vec<RawTag>, code: i32, p: Vec3) {
 impl Graph {
     /// The graph object `o` read back into nodes and edges, or `None` when its groups aren't
     /// laid out as a graph (it is then left alone).
-    fn read(o: &ForeignObject) -> Option<Graph> {
+    pub(super) fn read(o: &ForeignObject) -> Option<Graph> {
         let at = o.tags.iter().position(|t| t.code == 100 && t.value.eq_ignore_ascii_case("AcDbEvalGraph"))?;
         let head = o.tags.get(..at)?.to_vec();
         let body = o.tags.get(at + 1..)?;
         let int = |t: Option<&RawTag>, code: i32| t.filter(|t| t.code == code).and_then(|t| t.value.trim().parse::<i32>().ok());
+        let last_id = body.iter().take_while(|t| t.code == 96 || t.code == 97).filter_map(|t| t.value.trim().parse::<i32>().ok()).max().unwrap_or(0);
         let mut i = body.iter().position(|t| t.code != 96 && t.code != 97).unwrap_or(body.len());
         let (mut nodes, mut edges) = (Vec::new(), Vec::new());
         while body.get(i).is_some_and(|t| t.code == 91) {
@@ -148,20 +152,21 @@ impl Graph {
         if i != body.len() {
             return None;
         }
-        Some(Graph { handle: o.handle, head, nodes, edges })
+        Some(Graph { handle: o.handle, head, last_id, nodes, edges })
     }
 
     /// A new, empty graph owned by dictionary `dict`.
     fn new(handle: Handle, dict: Handle) -> Graph {
         let head = vec![tag(5, handle.hex()), tag(102, "{ACAD_REACTORS"), tag(330, dict.hex()), tag(102, "}"), tag(330, dict.hex())];
-        Graph { handle, head, nodes: Vec::new(), edges: Vec::new() }
+        Graph { handle, head, last_id: 0, nodes: Vec::new(), edges: Vec::new() }
     }
 
-    fn tags(&self) -> Vec<RawTag> {
+    pub(super) fn tags(&self) -> Vec<RawTag> {
         let mut out = self.head.clone();
         out.push(tag(100, "AcDbEvalGraph"));
-        out.push(tag(96, self.nodes.len()));
-        out.push(tag(97, self.nodes.len()));
+        let last = self.nodes.iter().map(|n| n.id).max().unwrap_or(0).max(self.last_id);
+        out.push(tag(96, last));
+        out.push(tag(97, last));
         for n in &self.nodes {
             out.extend([tag(91, n.index), tag(93, n.flags), tag(95, n.id), tag(360, n.handle.hex())]);
             out.extend(n.links.iter().map(|l| tag(92, l)));
@@ -175,7 +180,7 @@ impl Graph {
 
     /// The next free graph id.
     fn next_id(&self) -> i32 {
-        self.nodes.iter().map(|n| n.id).max().unwrap_or(0).saturating_add(1)
+        self.nodes.iter().map(|n| n.id).max().unwrap_or(0).max(self.last_id).saturating_add(1)
     }
 
     /// Add node `id` for object `handle`; its index.
@@ -199,7 +204,7 @@ impl Graph {
     }
 
     /// Add an edge of `kind` from node index `from` to `to`, last in both nodes' lists.
-    fn link(&mut self, from: i32, to: i32, kind: i32) {
+    pub(super) fn link(&mut self, from: i32, to: i32, kind: i32) {
         let index = self.edges.iter().map(|e| e.index).max().map_or(0, |m| m.saturating_add(1));
         let last_out = self.node_mut(from).map_or(-1, |n| n.links[3]);
         let last_in = self.node_mut(to).map_or(-1, |n| n.links[1]);
@@ -429,7 +434,7 @@ fn free_label(d: &Drawing, record: &str, prefix: &str) -> String {
     (1..).map(|i| format!("{prefix}{i}")).find(|n| !used.iter().any(|u| u.eq_ignore_ascii_case(n))).unwrap_or_else(|| format!("{prefix}1"))
 }
 
-fn finite(p: Vec3) -> bool {
+pub(super) fn finite(p: Vec3) -> bool {
     p.x.is_finite() && p.y.is_finite() && p.z.is_finite()
 }
 

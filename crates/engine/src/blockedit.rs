@@ -62,6 +62,9 @@ pub struct BlockEdit {
     pub current: bool,
     /// The visibility state the editor shows (BVSTATE Set); `None` for the block's first.
     pub visibility: Option<String>,
+    /// The parameters and actions picked in the editor (graph ids): MOVE, ERASE and Delete act on
+    /// them with the selected objects, and their points have grips.
+    pub picked: Vec<i32>,
 }
 
 /// Why a block can't be opened in the Block Editor, if it can't.
@@ -349,6 +352,7 @@ impl DocState {
                 base: Vec2::ZERO,
                 current: true,
                 visibility: None,
+                picked: Vec::new(),
             });
             return Ok(());
         }
@@ -377,6 +381,7 @@ impl DocState {
             base,
             current: false,
             visibility: None,
+            picked: Vec::new(),
         };
         // The editor shows the block's first visibility state (its other objects hidden).
         be.show_visibility_state(&mut d, bvmode);
@@ -505,5 +510,59 @@ impl crate::Session {
             self.doc_mut()?.hidden_objects = hidden;
         }
         Ok(())
+    }
+
+    /// The parameters and actions picked in the Block Editor (graph ids), those still there.
+    pub fn picked_elements(&self) -> Vec<i32> {
+        let Ok(st) = self.state() else { return Vec::new() };
+        let Some(be) = &st.block_edit else { return Vec::new() };
+        let Some(m) = cadcraft_doc::dynblock::dynamic_block(&st.doc, &be.name) else { return Vec::new() };
+        be.picked.iter().copied().filter(|n| m.parameters.iter().any(|p| p.node == *n) || m.actions.iter().any(|a| a.node == *n)).collect()
+    }
+
+    /// Pick parameters and actions `nodes` in the Block Editor (added to those picked with
+    /// `add`; none and not `add` picks nothing).
+    pub fn pick_elements(&mut self, nodes: &[i32], add: bool) -> Result<()> {
+        let st = self.state_mut()?;
+        let Some(be) = st.block_edit.as_mut() else { return Ok(()) };
+        if !add {
+            be.picked.clear();
+        }
+        for n in nodes {
+            if !be.picked.contains(n) {
+                be.picked.push(*n);
+            }
+        }
+        Ok(())
+    }
+
+    /// Move the picked parameters and actions by `d` (MOVE with them picked); they stay picked.
+    pub(crate) fn move_picked_elements(&mut self, d: Vec2) -> Result<usize> {
+        let nodes = self.picked_elements();
+        if nodes.is_empty() || d == Vec2::ZERO {
+            return Ok(0);
+        }
+        let name = self.state()?.block_edit.as_ref().map(|b| b.name.clone()).unwrap_or_default();
+        let mut doc = self.doc()?.clone();
+        for n in &nodes {
+            cadcraft_doc::dynblock::move_element(&mut doc, &name, *n, d.to3(0.0)).map_err(EngineError::Other)?;
+        }
+        *self.doc_mut()? = doc;
+        Ok(nodes.len())
+    }
+
+    /// Erase the picked parameters and actions (ERASE, Delete), as AutoCAD erases them: a
+    /// parameter takes its actions along. Nothing is picked afterwards.
+    pub(crate) fn erase_picked_elements(&mut self) -> Result<usize> {
+        let nodes = self.picked_elements();
+        self.pick_elements(&[], false)?;
+        if nodes.is_empty() {
+            return Ok(0);
+        }
+        let name = self.state()?.block_edit.as_ref().map(|b| b.name.clone()).unwrap_or_default();
+        let mut doc = self.doc()?.clone();
+        let erased = cadcraft_doc::dynblock::erase_elements(&mut doc, &name, &nodes).map_err(EngineError::Other)?;
+        *self.doc_mut()? = doc;
+        Ok(erased.len())
     }
 }

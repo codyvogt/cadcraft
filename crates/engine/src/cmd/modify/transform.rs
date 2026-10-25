@@ -29,8 +29,9 @@ pub(crate) fn transform_entities(s: &mut Session, hs: &[Handle], m: &Mat3, copy:
 }
 
 pub(super) fn erase(s: &mut Session, hs: &[Handle]) -> Result<usize> {
+    // The Block Editor's picked parameters and actions go too.
+    let mut n = s.erase_picked_elements()?;
     let d = s.doc_mut()?;
-    let mut n = 0;
     for h in hs {
         let locked = d.entity(*h).and_then(|e| d.layer(&e.common.layer)).is_some_and(|l| l.locked);
         if !locked && d.remove_entity(*h).is_some() {
@@ -60,7 +61,8 @@ pub(super) fn run_move(s: &mut Session, p: &Value) -> Result<Value> {
     let hs = targets(s, p)?;
     let d = delta_of("move", p)?;
     let moved = transform_entities(s, &hs, &Mat3::translate(d), false)?;
-    Ok(json!({ "moved": moved.len() }))
+    let marks = s.move_picked_elements(d)?;
+    Ok(json!({ "moved": moved.len() + marks }))
 }
 
 pub(super) fn run_copy(s: &mut Session, p: &Value) -> Result<Value> {

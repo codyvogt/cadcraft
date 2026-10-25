@@ -3,17 +3,22 @@
 //! parameters and actions (BPARAMETER, BACTION) drawn as the editor shows them, and a bar with
 //! the block's name and Save Block, Save Block As and Close Block Editor. A block with visibility
 //! states gets Visibility Mode (BVMODE), the state shown (picked from a list, as AutoCAD's
-//! Visibility panel offers it), Visibility States, Make Visible and Make Invisible; with BVMODE 1 the objects the state hides
-//! are drawn dimmed.
+//! Visibility panel offers it), Visibility States, Make Visible and Make Invisible; with BVMODE 1
+//! the objects the state hides are drawn dimmed.
+//!
+//! Parameters and actions are picked with a click ([`target`], [`click`]; Shift+click unpicks),
+//! as in AutoCAD's editor: picked ones are drawn heavier with grips at their points, and clicking
+//! a grip moves that point. MOVE, ERASE and Delete act on them (the engine's
+//! `blocks.element.*`).
 
 use std::sync::Arc;
 
 use cadcraft_engine::doc::Handle;
-use cadcraft_engine::doc::dynblock::{Mark, ParameterKind, dynamic_block};
+use cadcraft_engine::doc::dynblock::{ElementPoint, Mark, ParameterKind, dynamic_block};
 use cadcraft_engine::geom::Vec2;
 use cadcraft_render::DisplayList;
 use egui::{Align2, Color32, FontId, Painter, Pos2, Rect, RichText, Shape, Stroke, vec2};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use super::Xf;
 use crate::CadApp;
@@ -102,6 +107,7 @@ pub(super) fn paint(app: &mut CadApp, ctx: &egui::Context, p: &egui::Painter, xf
         p.line_segment([o - vec2(0.0, 12.0), o + vec2(0.0, 12.0)], st);
     }
     paint_marks(app, ctx, p, xf);
+    paint_grips(app, p, xf);
     let vis = states(app, ctx);
     if app.session.settings.bvmode
         && let Some(v) = &vis
@@ -202,6 +208,105 @@ fn marks(app: &CadApp, ctx: &egui::Context) -> Arc<(Vec<Mark>, Vec<i32>)> {
     m
 }
 
+/// What a click in the Block Editor hits first: a picked parameter's or action's grip, or a
+/// parameter or action.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Target {
+    Grip(i32, ElementPoint),
+    Mark(i32),
+}
+
+/// How far from the cursor (screen points) a mark or grip still counts as hit.
+const REACH: f32 = 6.0;
+
+fn segment_distance(a: Pos2, b: Pos2, p: Pos2) -> f32 {
+    let d = b - a;
+    let t = if d.length_sq() <= 1e-6 { 0.0 } else { ((p - a).dot(d) / d.length_sq()).clamp(0.0, 1.0) };
+    (a + d * t).distance(p)
+}
+
+/// About where a label of `text` drawn at `at` with `align` lies (12-point text).
+fn label_rect(at: Pos2, align: Align2, text: &str) -> Rect {
+    let size = vec2(7.0 * text.chars().count() as f32, 14.0);
+    align.anchor_size(at, size)
+}
+
+/// The graph id a mark stands for (a parameter's or an action's).
+fn mark_node(m: &Mark) -> i32 {
+    match m {
+        Mark::Action { node, .. } => *node,
+        other => other.parameter_node().unwrap_or(0),
+    }
+}
+
+/// The grip or mark under `pos`, when the Block Editor is open with no command running.
+pub(super) fn target(app: &CadApp, ctx: &egui::Context, xf: &Xf, pos: Option<Pos2>) -> Option<Target> {
+    let pos = pos?;
+    if app.session.prompting() || editing(app).is_none() {
+        return None;
+    }
+    if let Some((n, w, _)) = app.session.element_grips().into_iter().find(|(_, _, at)| xf.to_screen(*at).distance(pos) <= REACH) {
+        return Some(Target::Grip(n, w));
+    }
+    let to = |v: cadcraft_engine::geom::Vec3| xf.to_screen(v.xy());
+    let marks = marks(app, ctx);
+    marks
+        .0
+        .iter()
+        .find(|m| match m {
+            Mark::Linear { base, end, offset, label, .. } => {
+                let (a, b) = (base.xy(), end.xy());
+                let dir = (b - a).normalized();
+                let shift = Vec2::new(-dir.y, dir.x) * *offset;
+                let (da, db) = (xf.to_screen(a + shift), xf.to_screen(b + shift));
+                let (sa, sb) = (to(*base), to(*end));
+                [(sa, da), (sb, db), (da, db)].iter().any(|(p, q)| segment_distance(*p, *q, pos) <= REACH)
+                    || label_rect(da + (db - da) * 0.5, Align2::CENTER_BOTTOM, label).contains(pos)
+            }
+            Mark::Point { at, label_at, label, .. } => {
+                let (s, l) = (to(*at), to(*label_at));
+                s.distance(pos) <= REACH || segment_distance(s, l, pos) <= REACH || label_rect(l, Align2::LEFT_BOTTOM, label).contains(pos)
+            }
+            Mark::List { at, label, .. } => {
+                let s = to(*at);
+                s.distance(pos) <= REACH + 2.0 || label_rect(s + vec2(8.0, 0.0), Align2::LEFT_CENTER, label).contains(pos)
+            }
+            Mark::Parameter { at, label, .. } => label_rect(to(*at), Align2::LEFT_BOTTOM, label).contains(pos),
+            Mark::Action { at, name, .. } => label_rect(to(*at), Align2::CENTER_CENTER, name).expand2(vec2(4.0, 2.0)).contains(pos),
+        })
+        .map(|m| Target::Mark(mark_node(m)))
+}
+
+/// A click on `t`: a grip starts moving its point; a parameter or action is picked (Shift+click
+/// unpicks it).
+pub(super) fn click(app: &mut CadApp, t: Target, shift: bool) {
+    let r = match t {
+        Target::Grip(n, w) => app.session.start_element_grip(n, w).map(|_| Value::Null).map_err(|e| e.to_string()),
+        Target::Mark(n) => {
+            let picked = app.session.picked_elements();
+            if shift && picked.contains(&n) {
+                let rest: Vec<i32> = picked.into_iter().filter(|p| *p != n).collect();
+                app.run("blocks.element.select", json!({ "nodes": rest }))
+            } else {
+                app.run("blocks.element.select", json!({ "nodes": [n], "add": true }))
+            }
+        }
+    };
+    if let Err(e) = r {
+        app.session.echo(e);
+    }
+}
+
+/// The picked parameters' and actions' grips: squares at their points, as entity grips.
+fn paint_grips(app: &CadApp, p: &Painter, xf: &Xf) {
+    let t = Tokens::get();
+    for (_, _, at) in app.session.element_grips() {
+        let r = Rect::from_center_size(xf.to_screen(at), vec2(9.0, 9.0));
+        p.rect_filled(r, 0.0, t.grip);
+        p.rect_stroke(r, 0.0, Stroke::new(1.0, t.canvas), egui::StrokeKind::Middle);
+    }
+}
+
 /// A filled arrow at `at` pointing along screen direction `u`, as a linear parameter's grip.
 fn arrow(p: &Painter, at: Pos2, u: egui::Vec2, color: Color32) {
     let n = vec2(-u.y, u.x);
@@ -218,12 +323,15 @@ fn paint_marks(app: &CadApp, ctx: &egui::Context, p: &Painter, xf: &Xf) {
     let to = |v: cadcraft_engine::geom::Vec3| xf.to_screen(v.xy());
     let marks = marks(app, ctx);
     let (all, inactive) = &*marks;
+    let picked = app.session.picked_elements();
     for m in all {
         // A parameter the visibility state leaves out shows dimmed (BVMODE 1).
         let dim = m.parameter_node().is_some_and(|n| inactive.contains(&n));
         let fade = |c: Color32| if dim { c.gamma_multiply(0.35) } else { c };
         let (accent, grip_dyn) = (fade(t.accent), fade(t.grip_dyn));
-        let line = Stroke::new(1.0, accent);
+        // Picked ones are drawn heavier.
+        let width = if picked.contains(&mark_node(m)) { 2.5 } else { 1.0 };
+        let line = Stroke::new(width, accent);
         match m {
             Mark::Linear { base, end, offset, label, base_grip, end_grip, .. } => {
                 let (a, b) = (base.xy(), end.xy());
@@ -271,7 +379,7 @@ fn paint_marks(app: &CadApp, ctx: &egui::Context, p: &Painter, xf: &Xf) {
                 let g = p.layout_no_wrap(name.clone(), font.clone(), t.text);
                 let r = Rect::from_center_size(c, g.size() + vec2(8.0, 4.0));
                 p.rect_filled(r, 3.0, t.cmd_bg);
-                p.rect_stroke(r, 3.0, Stroke::new(1.0, t.warn), egui::StrokeKind::Middle);
+                p.rect_stroke(r, 3.0, Stroke::new(width, t.warn), egui::StrokeKind::Middle);
                 p.galley(r.min + vec2(4.0, 2.0), g, t.text);
             }
         }

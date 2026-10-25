@@ -112,6 +112,10 @@ pub fn entries(app: &CadApp) -> Vec<Vec<Entry>> {
     let mut clip: Vec<Entry> = sub("Clipboard", items(app, CLIPBOARD)).into_iter().collect();
     clip.extend(sub("Isolate", items(app, ISOLATE)));
     push(&mut groups, clip);
+    // Only parameters or actions picked in the Block Editor: what acts on them.
+    if !selected && !app.session.picked_elements().is_empty() {
+        push(&mut groups, items(app, &["erase", "move"]));
+    }
     if selected {
         let mut edit: Vec<Entry> = EDIT.iter().filter_map(|(id, label)| item(app, id, *label)).collect();
         edit.extend(sub("Draw Order", items(app, DRAW_ORDER)));

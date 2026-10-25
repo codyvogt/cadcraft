@@ -857,6 +857,9 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
             if let Err(e) = result {
                 app.session.echo(e.to_string());
             }
+        } else if let Some(t) = blockedit::target(app, ui.ctx(), &xf, hover_pos) {
+            // The Block Editor's parameters and actions, and their grips, before objects.
+            blockedit::click(app, t, mods.shift);
         } else if let Some(g) = crate::dyngrips::at(app, &xf, hover_pos) {
             crate::dyngrips::click(app, g);
         } else if let Some(g) = grip_at(app, &xf, hover_pos) {
@@ -880,6 +883,7 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
         && rect.contains(origin)
         && grip_at(app, &xf, Some(origin)).is_none()
         && crate::dyngrips::at(app, &xf, Some(origin)).is_none()
+        && blockedit::target(app, ui.ctx(), &xf, Some(origin)).is_none()
     {
         app.canvas.drag_window = app.session.begin_window(xf.to_world(origin));
     }
