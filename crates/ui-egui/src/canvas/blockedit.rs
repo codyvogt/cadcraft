@@ -2,8 +2,8 @@
 //! mistaken for the drawing, the block's base point marked at the origin, the block's
 //! parameters and actions (BPARAMETER, BACTION) drawn as the editor shows them, and a bar with
 //! the block's name and Save Block, Save Block As and Close Block Editor. A block with visibility
-//! states gets the state shown (picked from a list, as AutoCAD's Visibility panel offers it),
-//! Visibility States, Make Visible and Make Invisible; with BVMODE 1 the objects the state hides
+//! states gets Visibility Mode (BVMODE), the state shown (picked from a list, as AutoCAD's
+//! Visibility panel offers it), Visibility States, Make Visible and Make Invisible; with BVMODE 1 the objects the state hides
 //! are drawn dimmed.
 
 use std::sync::Arc;
@@ -111,6 +111,8 @@ pub(super) fn paint(app: &mut CadApp, ctx: &egui::Context, p: &egui::Painter, xf
     }
     let mut action: Option<(&str, bool)> = None;
     let mut pick: Option<String> = None;
+    let bvmode = app.session.settings.bvmode;
+    let mut toggle_mode = false;
     egui::Area::new(id()).order(egui::Order::Foreground).pivot(egui::Align2::CENTER_TOP).fixed_pos(rect.center_top() + vec2(0.0, 8.0)).show(
         ctx,
         |ui| {
@@ -135,6 +137,14 @@ pub(super) fn paint(app: &mut CadApp, ctx: &egui::Context, p: &egui::Painter, xf
                     }
                     if let Some(v) = &vis {
                         ui.separator();
+                        // BVMODE: whether objects the state hides show dimmed (on) or not at all.
+                        if ui
+                            .selectable_label(bvmode, crate::tl!("Visibility Mode"))
+                            .on_hover_text(crate::tl!("Show the objects this visibility state hides, dimmed (BVMODE)"))
+                            .clicked()
+                        {
+                            toggle_mode = true;
+                        }
                         egui::ComboBox::from_id_salt("cadcraft-block-editor-state").selected_text(v.current.as_str()).show_ui(ui, |ui| {
                             for n in &v.names {
                                 if ui.selectable_label(*n == v.current, n.as_str()).clicked() && *n != v.current {
@@ -156,6 +166,9 @@ pub(super) fn paint(app: &mut CadApp, ctx: &egui::Context, p: &egui::Painter, xf
             });
         },
     );
+    if toggle_mode {
+        let _ = app.run("setvar", json!({ "name": "BVMODE", "value": i32::from(!bvmode) }));
+    }
     if let Some(n) = pick {
         let _ = app.run("bvstate", json!({ "set": n }));
     }
@@ -169,21 +182,22 @@ pub(super) fn paint(app: &mut CadApp, ctx: &egui::Context, p: &egui::Painter, xf
     }
 }
 
-/// The edited block's parameters and actions, worked out once per drawing revision and
-/// visibility state shown.
-fn marks(app: &CadApp, ctx: &egui::Context) -> Arc<Vec<Mark>> {
-    type Cache = Option<((u64, u64, Option<String>), Arc<Vec<Mark>>)>;
+/// The edited block's parameters and actions and, with BVMODE 1, the graph ids of the parameters
+/// the visibility state shown leaves out (drawn dimmed; without BVMODE they aren't drawn), worked
+/// out once per drawing revision, visibility state shown and BVMODE.
+fn marks(app: &CadApp, ctx: &egui::Context) -> Arc<(Vec<Mark>, Vec<i32>)> {
+    type Cache = Option<((u64, u64, Option<String>, bool), Arc<(Vec<Mark>, Vec<i32>)>)>;
     let Ok(st) = app.session.state() else { return Arc::default() };
     let Some(be) = &st.block_edit else { return Arc::default() };
-    // The visibility state shown decides which parameters show.
-    let key = (st.uid, st.revision, be.visibility.clone());
+    let bvmode = app.session.settings.bvmode;
+    let key = (st.uid, st.revision, be.visibility.clone(), bvmode);
     let cid = egui::Id::unique("cadcraft-block-editor-marks");
     if let Some((k, m)) = ctx.data(|d| d.get_temp::<Cache>(cid)).flatten()
         && k == key
     {
         return m;
     }
-    let m = Arc::new(be.marks(&st.doc));
+    let m = Arc::new(if bvmode { (be.all_marks(&st.doc), be.inactive_parameters(&st.doc)) } else { (be.marks(&st.doc), Vec::new()) });
     ctx.data_mut(|d| d.insert_temp::<Cache>(cid, Some((key, m.clone()))));
     m
 }
@@ -200,10 +214,16 @@ fn arrow(p: &Painter, at: Pos2, u: egui::Vec2, color: Color32) {
 /// name, and actions as badges.
 fn paint_marks(app: &CadApp, ctx: &egui::Context, p: &Painter, xf: &Xf) {
     let t = Tokens::get();
-    let line = Stroke::new(1.0, t.accent);
     let font = FontId::proportional(12.0);
     let to = |v: cadcraft_engine::geom::Vec3| xf.to_screen(v.xy());
-    for m in marks(app, ctx).iter() {
+    let marks = marks(app, ctx);
+    let (all, inactive) = &*marks;
+    for m in all {
+        // A parameter the visibility state leaves out shows dimmed (BVMODE 1).
+        let dim = m.parameter_node().is_some_and(|n| inactive.contains(&n));
+        let fade = |c: Color32| if dim { c.gamma_multiply(0.35) } else { c };
+        let (accent, grip_dyn) = (fade(t.accent), fade(t.grip_dyn));
+        let line = Stroke::new(1.0, accent);
         match m {
             Mark::Linear { base, end, offset, label, base_grip, end_grip, .. } => {
                 let (a, b) = (base.xy(), end.xy());
@@ -217,25 +237,25 @@ fn paint_marks(app: &CadApp, ctx: &egui::Context, p: &Painter, xf: &Xf) {
                 let along = sb - sa;
                 let u = if along.length() > 1e-6 { along / along.length() } else { vec2(1.0, 0.0) };
                 if *base_grip {
-                    arrow(p, sa, -u, t.grip_dyn);
+                    arrow(p, sa, -u, grip_dyn);
                 }
                 if *end_grip {
-                    arrow(p, sb, u, t.grip_dyn);
+                    arrow(p, sb, u, grip_dyn);
                 }
-                p.text(da + (db - da) * 0.5, Align2::CENTER_BOTTOM, label, font.clone(), t.accent);
+                p.text(da + (db - da) * 0.5, Align2::CENTER_BOTTOM, label, font.clone(), accent);
             }
             Mark::Point { at, label_at, label, grip, .. } => {
                 let (s, l) = (to(*at), to(*label_at));
                 p.line_segment([s, l], line);
                 if *grip {
-                    p.rect_filled(Rect::from_center_size(s, vec2(8.0, 8.0)), 0.0, t.grip_dyn);
+                    p.rect_filled(Rect::from_center_size(s, vec2(8.0, 8.0)), 0.0, grip_dyn);
                 } else {
                     p.rect_stroke(Rect::from_center_size(s, vec2(8.0, 8.0)), 0.0, line, egui::StrokeKind::Middle);
                 }
-                p.text(l, Align2::LEFT_BOTTOM, label, font.clone(), t.accent);
+                p.text(l, Align2::LEFT_BOTTOM, label, font.clone(), accent);
             }
             Mark::Parameter { at, label, .. } => {
-                p.text(to(*at), Align2::LEFT_BOTTOM, label, font.clone(), t.accent);
+                p.text(to(*at), Align2::LEFT_BOTTOM, label, font.clone(), accent);
             }
             Mark::Action { at, name, .. } => {
                 let c = to(*at);

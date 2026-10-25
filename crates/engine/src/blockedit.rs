@@ -113,17 +113,17 @@ impl BlockEdit {
     /// The edited block's parameters and actions as the editor draws them, in the editor's
     /// coordinates (`editor` is the editor's drawing).
     pub fn marks(&self, editor: &Drawing) -> Vec<cadcraft_doc::dynblock::Mark> {
+        // Parameters the visibility state shown leaves out aren't drawn, as in AutoCAD.
+        let inactive = self.inactive_parameters(editor);
+        self.all_marks(editor).into_iter().filter(|m| m.parameter_node().is_none_or(|n| !inactive.contains(&n))).collect()
+    }
+
+    /// [`BlockEdit::marks`] with the parameters the visibility state shown leaves out too (BVMODE 1
+    /// draws them dimmed; [`BlockEdit::inactive_parameters`] names them).
+    pub fn all_marks(&self, editor: &Drawing) -> Vec<cadcraft_doc::dynblock::Mark> {
         use cadcraft_doc::dynblock::Mark;
         let off = self.base.to3(0.0);
         let mut out = cadcraft_doc::dynblock::marks(editor, &self.name);
-        // Parameters the visibility state shown leaves out aren't drawn, as in AutoCAD.
-        let inactive = self.inactive_parameters(editor);
-        if !inactive.is_empty() {
-            out.retain(|m| match m {
-                Mark::Linear { node, .. } | Mark::Point { node, .. } | Mark::Parameter { node, .. } => !inactive.contains(node),
-                Mark::Action { .. } => true,
-            });
-        }
         for m in &mut out {
             match m {
                 Mark::Linear { base, end, .. } => (*base, *end) = (*base - off, *end - off),
@@ -150,7 +150,7 @@ impl BlockEdit {
 
     /// Graph ids of the parameters the visibility state the editor shows doesn't list as active
     /// (the visibility parameter itself always shows).
-    fn inactive_parameters(&self, editor: &Drawing) -> Vec<i32> {
+    pub fn inactive_parameters(&self, editor: &Drawing) -> Vec<i32> {
         use cadcraft_doc::dynblock::ParameterKind;
         let Some(m) = cadcraft_doc::dynblock::dynamic_block(editor, &self.name) else { return Vec::new() };
         let Some(states) = m.parameters.iter().find_map(|p| match &p.kind {

@@ -22,6 +22,16 @@ pub enum Mark {
     Action { node: i32, at: Vec3, name: String },
 }
 
+impl Mark {
+    /// The graph id of the parameter this marks (`None` for an action).
+    pub fn parameter_node(&self) -> Option<i32> {
+        match self {
+            Mark::Linear { node, .. } | Mark::Point { node, .. } | Mark::Parameter { node, .. } => Some(*node),
+            Mark::Action { .. } => None,
+        }
+    }
+}
+
 /// Block `name`'s parameters and actions as the Block Editor draws them (empty when it has none).
 pub fn marks(d: &Drawing, name: &str) -> Vec<Mark> {
     let Some(m) = dynamic_block(d, name) else { return Vec::new() };
