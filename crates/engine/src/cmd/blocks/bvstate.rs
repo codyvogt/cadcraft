@@ -6,7 +6,9 @@
 //! grips of a parameter added there.
 
 use cadcraft_doc::Handle;
-use cadcraft_doc::dynblock::{ParameterKind, VisibilityState, adopt_objects, dynamic_block, parameter_objects, set_visibility};
+use cadcraft_doc::dynblock::{
+    MAX_VISIBILITY_STATES, ParameterKind, VisibilityState, adopt_objects, dynamic_block, parameter_objects, set_visibility,
+};
 use serde_json::{Value, json};
 
 use crate::cmd::curves::{KW, handle_value};
@@ -19,7 +21,7 @@ pub(super) fn specs() -> Vec<CommandSpec> {
         CommandSpec::new("bvstate", "Visibility States", run_bvstate)
             .alias(&["-bvstate"])
             .params(
-                "{new?: name, visibility?: \"hide\"|\"show\"|\"current\" (what the new state shows: nothing, every object, or what the current state shows; default current) | set?: name (the state the editor shows) | delete?: name or [names] | rename?: name, to: new name} → {current, states} (no option: just the list)",
+                "{new?: name, visibility?: \"hide\"|\"show\"|\"current\" (what the new state shows: nothing, every object, or what the current state shows; default current) | set?: name (the state the editor shows) | delete?: name or [names] | rename?: name, to: new name | order?: [every state's name, in the new order] | ops?: [any of these, run in turn as one step (the Visibility States dialog's OK)]} → {current, states} (no option: just the list)",
             )
             .enabled(visibility_editing)
             .interactive(|_| Ok(Box::new(BvstateM::default()))),
@@ -198,7 +200,71 @@ fn rename_state(s: &mut Session, from: &str, to: &str) -> Result<Value> {
     v.write(s)
 }
 
+/// Most operations one `ops` list runs.
+const MAX_OPS: usize = 1_000;
+
 fn run_bvstate(s: &mut Session, p: &Value) -> Result<Value> {
+    match p.get("ops") {
+        None | Some(Value::Null) => one_op(s, p),
+        Some(Value::Array(ops)) if ops.len() <= MAX_OPS => {
+            if ops.iter().any(|op| !op.is_object() || op.get("ops").is_some()) {
+                return Err(bad("bvstate", "each of `ops` is one operation: {new}, {set}, {delete}, {rename, to} or {order}"));
+            }
+            // All or nothing: a refused operation leaves the states as they were.
+            let before = s.doc()?.clone();
+            let shown = s.state()?.block_edit.as_ref().and_then(|b| b.visibility.clone());
+            for op in ops {
+                if let Err(e) = one_op(s, op) {
+                    *s.doc_mut()? = before;
+                    show(s, shown)?;
+                    return Err(e);
+                }
+            }
+            let v = read(s)?;
+            let current = v.current_name();
+            Ok(v.summary(current))
+        }
+        Some(_) => Err(bad("bvstate", format!("`ops` is a list of at most {MAX_OPS} operations"))),
+    }
+}
+
+/// Put the states in the order of `names` (every state once).
+fn order_states(s: &mut Session, names: &[String]) -> Result<Value> {
+    let mut v = read(s)?;
+    let shown = v.current_name();
+    let mut states = Vec::with_capacity(v.states.len());
+    for n in names {
+        let i = v.find(n).ok_or_else(|| bad("bvstate", format!("no visibility state \"{}\"", n.trim())))?;
+        if states.iter().any(|st: &VisibilityState| st.name.eq_ignore_ascii_case(n.trim())) {
+            return Err(bad("bvstate", format!("\"{}\" is listed twice in `order`", n.trim())));
+        }
+        states.push(v.states.get(i).cloned().unwrap_or_default());
+    }
+    if states.len() != v.states.len() {
+        return Err(bad("bvstate", "`order` lists every visibility state once"));
+    }
+    v.states = states;
+    v.current = v.find(&shown).unwrap_or(0);
+    v.write(s)
+}
+
+/// A list of names, or one name.
+fn names_param(p: &Value, key: &str) -> Result<Option<Vec<String>>> {
+    match p.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(n)) => Ok(Some(vec![n.clone()])),
+        Some(Value::Array(a)) if a.len() <= MAX_VISIBILITY_STATES => {
+            let names: Vec<String> = a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect();
+            if names.len() != a.len() || names.is_empty() {
+                return Err(bad("bvstate", format!("`{key}` is a state name or a list of names")));
+            }
+            Ok(Some(names))
+        }
+        Some(_) => Err(bad("bvstate", format!("`{key}` is a state name or a list of names"))),
+    }
+}
+
+fn one_op(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(name) = str_param(p, "new") {
         let shows = match str_param(p, "visibility").map(|t| t.trim().to_ascii_lowercase()).as_deref() {
             None | Some("current") => NewShows::Current,
@@ -215,17 +281,11 @@ fn run_bvstate(s: &mut Session, p: &Value) -> Result<Value> {
         let to = str_param(p, "to").ok_or_else(|| bad("bvstate", "`to`: the state's new name"))?;
         return rename_state(s, from, to);
     }
-    match p.get("delete") {
-        Some(Value::String(n)) => return delete_states(s, std::slice::from_ref(n)),
-        Some(Value::Array(a)) => {
-            let names: Vec<String> = a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect();
-            if names.len() != a.len() || names.is_empty() {
-                return Err(bad("bvstate", "`delete` is a state name or a list of names"));
-            }
-            return delete_states(s, &names);
-        }
-        Some(_) => return Err(bad("bvstate", "`delete` is a state name or a list of names")),
-        None => {}
+    if let Some(names) = names_param(p, "delete")? {
+        return delete_states(s, &names);
+    }
+    if let Some(names) = names_param(p, "order")? {
+        return order_states(s, &names);
     }
     let v = read(s)?;
     let current = v.current_name();

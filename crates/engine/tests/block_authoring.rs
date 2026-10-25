@@ -405,6 +405,14 @@ fn hostile_visibility_params_never_panic() {
         ("bvstate", json!({ "delete": "Nope" })),
         ("bvstate", json!({ "rename": "VisibilityState0" })),
         ("bvstate", json!({ "rename": "Nope", "to": "X" })),
+        ("bvstate", json!({ "ops": 5 })),
+        ("bvstate", json!({ "ops": [{ "ops": [] }] })),
+        ("bvstate", json!({ "ops": [7] })),
+        ("bvstate", json!({ "ops": (0..1_001).map(|_| json!({})).collect::<Vec<_>>() })),
+        ("bvstate", json!({ "order": ["Nope"] })),
+        ("bvstate", json!({ "order": ["VisibilityState0", "VisibilityState0"] })),
+        ("bvstate", json!({ "order": [] })),
+        ("bvstate", json!({ "order": 3 })),
         ("bvhide", json!({ "handles": [] })),
         ("bvhide", json!({ "handles": ["zz"] })),
         ("bvhide", json!({ "handles": ["FFFFFF"] })),
@@ -417,7 +425,13 @@ fn hostile_visibility_params_never_panic() {
     for i in 0..50 {
         s.execute("bvstate", &json!({ "new": format!("S{i}"), "visibility": "show" })).unwrap();
     }
-    s.script("BVSTATE\nD\n,,,\n").unwrap();
+    // Reordering keeps every state and the one shown.
+    s.execute("bvstate", &json!({ "set": "S3" })).unwrap();
+    let mut names: Vec<String> = (0..50).rev().map(|i| format!("S{i}")).collect();
+    names.push("VisibilityState0".into());
+    let out = s.execute("bvstate", &json!({ "order": names })).unwrap();
+    assert_eq!((&out["current"], &out["states"][0], &out["states"][50]), (&json!("S3"), &json!("S49"), &json!("VisibilityState0")));
+    s.script("-BVSTATE\nD\n,,,\n").unwrap();
     s.input(Input::Cancel).unwrap();
     assert!(s.running.is_none());
 }
