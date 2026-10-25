@@ -346,10 +346,12 @@ impl<'a> Author<'a> {
         };
         let grip = self.node(kind, gh, gid, tags);
         self.class("BLOCKGRIPLOCATIONCOMPONENT", "AcDbBlockGripExpr");
+        // Each component names the parameter it reads (its graph id).
+        let owner = self.graph.nodes.iter().find(|n| n.index == param).map_or(0, |n| n.id);
         for (id, comp) in [(xid, x_name), (yid, y_name)] {
             let h = self.d.new_handle();
             let mut tags = node_head(h, self.graph.handle, id);
-            tags.extend([tag(1, ""), tag(70, 40), real(140, value), tag(100, "AcDbBlockGripExpr"), tag(91, 1), tag(300, comp)]);
+            tags.extend([tag(1, ""), tag(70, 40), real(140, value), tag(100, "AcDbBlockGripExpr"), tag(91, owner), tag(300, comp)]);
             let c = self.node("BLOCKGRIPLOCATIONCOMPONENT", h, id, tags);
             self.graph.link(param, c, 1);
         }

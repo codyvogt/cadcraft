@@ -316,3 +316,31 @@ fn element_tags_are_unique_and_the_record_keeps_the_next() {
     let x = d.foreign.records.get(&("BLOCK_RECORD".to_string(), "BOX".to_string())).unwrap();
     assert_eq!(x.xdata.iter().rev().find(|t| t.code == 1071).map(|t| t.value.as_str()), Some("3"));
 }
+
+/// Each grip location component names the parameter it reads (`AcDbBlockGripExpr` 91), as
+/// AutoCAD writes it: a second parameter's components name it, not the first. AutoCAD evaluated
+/// no parameter of a block whose later components named the first.
+#[test]
+fn grip_components_name_their_own_parameter() {
+    let mut d = box_drawing();
+    let first = add_parameter(&mut d, "BOX", &linear(1)).unwrap();
+    let second = add_parameter(&mut d, "BOX", &ParameterSpec::Point { at: v(10.0, 2.5), label: None, label_at: v(11.0, 3.5), grips: 1 }).unwrap();
+    let owners: Vec<(String, i32)> = d
+        .foreign
+        .objects
+        .iter()
+        .filter(|o| o.kind == "BLOCKGRIPLOCATIONCOMPONENT")
+        .map(|o| {
+            let at = o.tags.iter().position(|t| t.value == "AcDbBlockGripExpr").unwrap();
+            let owner = o.tags[at + 1..].iter().find(|t| t.code == 91).unwrap().value.parse().unwrap();
+            let name = o.tags.iter().find(|t| t.code == 300).unwrap().value.clone();
+            (name, owner)
+        })
+        .collect();
+    let want: Vec<(String, i32)> = [("UpdatedEndX", first), ("UpdatedEndY", first), ("UpdatedX", second), ("UpdatedY", second)]
+        .iter()
+        .map(|(n, o)| (n.to_string(), *o))
+        .collect();
+    assert_eq!(owners, want);
+    assert_eq!((first, second), (1, 5));
+}
