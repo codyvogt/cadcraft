@@ -87,7 +87,7 @@ fn marks(app: &CadApp, ctx: &egui::Context) -> Arc<Vec<Mark>> {
     let Ok(st) = app.session.state() else { return Arc::default() };
     let Some(be) = &st.block_edit else { return Arc::default() };
     let key = (st.uid, st.revision);
-    let cid = egui::Id::new("cadcraft-block-editor-marks");
+    let cid = egui::Id::unique("cadcraft-block-editor-marks");
     if let Some((k, m)) = ctx.data(|d| d.get_temp::<Cache>(cid)).flatten()
         && k == key
     {
