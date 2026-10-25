@@ -502,7 +502,8 @@ impl crate::Session {
     /// objects hidden, or with BVMODE 1 left for the canvas to dim. Nothing outside the editor.
     pub(crate) fn refresh_block_visibility(&mut self) -> Result<()> {
         let bvmode = self.settings.bvmode;
-        let st = self.state()?;
+        // Without a drawing there is no Block Editor (SETVAR BVMODE from the Start tab).
+        let Ok(st) = self.state() else { return Ok(()) };
         let Some(be) = &st.block_edit else { return Ok(()) };
         let hidden = if bvmode { Vec::new() } else { be.visibility_state(&st.doc).map(|(_, h)| h).unwrap_or_default() };
         let hidden: std::collections::BTreeSet<_> = hidden.into_iter().filter(|h| st.doc.model.get(*h).is_some()).collect();
@@ -537,6 +538,8 @@ impl crate::Session {
     }
 
     /// Move the picked parameters and actions by `d` (MOVE with them picked); they stay picked.
+    /// One that can't be moved yet (a kind from another file, such as a polar parameter) stays
+    /// where it is and is reported, so MOVE never stops after the objects have moved.
     pub(crate) fn move_picked_elements(&mut self, d: Vec2) -> Result<usize> {
         let nodes = self.picked_elements();
         if nodes.is_empty() || d == Vec2::ZERO {
@@ -544,11 +547,25 @@ impl crate::Session {
         }
         let name = self.state()?.block_edit.as_ref().map(|b| b.name.clone()).unwrap_or_default();
         let mut doc = self.doc()?.clone();
+        let (mut moved, mut stayed) = (0, 0);
         for n in &nodes {
-            cadcraft_doc::dynblock::move_element(&mut doc, &name, *n, d.to3(0.0)).map_err(EngineError::Other)?;
+            // Each on a copy: a refused one leaves the others' moves alone.
+            let mut trial = doc.clone();
+            match cadcraft_doc::dynblock::move_element(&mut trial, &name, *n, d.to3(0.0)) {
+                Ok(()) => {
+                    doc = trial;
+                    moved += 1;
+                }
+                Err(_) => stayed += 1,
+            }
         }
-        *self.doc_mut()? = doc;
-        Ok(nodes.len())
+        if stayed > 0 {
+            self.echo(format!("{stayed} parameter(s) of a kind that can't be moved yet stayed where they were."));
+        }
+        if moved > 0 {
+            *self.doc_mut()? = doc;
+        }
+        Ok(moved)
     }
 
     /// Erase the picked parameters and actions (ERASE, Delete), as AutoCAD erases them: a

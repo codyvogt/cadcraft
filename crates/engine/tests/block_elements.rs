@@ -160,3 +160,37 @@ fn hostile_element_params_never_panic() {
     s.execute("bclose", &json!({ "save": false })).unwrap();
     assert!(s.execute("blocks.element.select", &json!({ "nodes": [1] })).is_err());
 }
+
+/// A picked parameter of a kind that can't be moved yet (here a polar parameter, as AutoCAD's
+/// blocks have) stays put; MOVE still moves the objects and the other picked ones, once.
+#[test]
+fn move_leaves_a_parameter_it_cannot_move_and_finishes() {
+    let (mut s, rect) = authored();
+    {
+        let d = s.doc_mut().unwrap();
+        let f = std::sync::Arc::make_mut(&mut d.foreign);
+        let o = f.objects.iter_mut().find(|o| o.kind == "BLOCKLINEARPARAMETER").unwrap();
+        o.kind = "BLOCKPOLARPARAMETER".into();
+    }
+    s.execute("blocks.element.select", &json!({ "nodes": [1, 9] })).unwrap();
+    s.execute("select", &json!({ "handles": [rect.hex()] })).unwrap();
+    s.script("MOVE\n0,0\n1,0\n").unwrap();
+    assert!(s.running.is_none(), "MOVE finished");
+    let m = dynamic_block(s.doc().unwrap(), "Box").unwrap();
+    let ParameterKind::Polar { base, .. } = &m.parameters[0].kind else { panic!("{:?}", m.parameters[0].kind) };
+    assert_eq!(*base, Vec3::new(0.0, -1.0, 0.0), "the polar parameter stayed");
+    let ParameterKind::Point { at, .. } = &m.parameters[1].kind else { panic!() };
+    assert_eq!(*at, Vec3::new(3.0, 2.0, 0.0), "the point parameter moved");
+    let EntityKind::LwPolyline(pl) = &s.doc().unwrap().entity(rect).unwrap().kind else { panic!() };
+    assert_eq!(pl.vertices[0].p, Vec2::new(1.0, 0.0), "the rectangle moved once");
+}
+
+/// BVMODE can be set before any drawing is open (saved settings load at startup), like the
+/// other session variables.
+#[test]
+fn bvmode_is_set_without_a_drawing() {
+    let mut s = Session::empty();
+    cadcraft_engine::sysvars::set(&mut s, "BVMODE", &json!(1)).unwrap();
+    assert!(s.settings.bvmode);
+    cadcraft_engine::sysvars::set(&mut s, "OSMODE", &json!(3)).unwrap();
+}

@@ -270,15 +270,19 @@ pub fn erase_elements(d: &mut Drawing, block: &str, nodes: &[i32]) -> Result<Vec
     let kept: Vec<_> = g.nodes.iter().filter(|n| !gone.contains(&n.index)).cloned().collect();
     let renumber: Vec<(i32, i32)> = kept.iter().zip(0..).map(|(n, i)| (n.index, i)).collect();
     let new_index = |old: i32| renumber.iter().find(|(o, _)| *o == old).map(|(_, n)| *n);
-    let edges: Vec<(i32, i32, i32)> = g.edges.iter().filter_map(|e| Some((new_index(e.from)?, new_index(e.to)?, e.kind))).collect();
+    let edges: Vec<(i32, i32, i32, i32)> = g.edges.iter().filter_map(|e| Some((new_index(e.from)?, new_index(e.to)?, e.kind, e.flags))).collect();
     g.nodes = kept;
     for (n, i) in g.nodes.iter_mut().zip(0..) {
         n.index = i;
         n.links = [-1; 4];
     }
     g.edges.clear();
-    for (from, to, kind) in edges {
+    for (from, to, kind, flags) in edges {
         g.link(from, to, kind);
+        // An edge keeps its flags (a graph read from a file may have set some).
+        if let Some(e) = g.edges.last_mut() {
+            e.flags = flags;
+        }
     }
     let erased_handles: Vec<Handle> = handles.clone();
     let f = std::sync::Arc::make_mut(&mut d.foreign);
@@ -333,5 +337,37 @@ pub fn element_points(d: &Drawing, block: &str, node: i32) -> Vec<(ElementPoint,
         }
         Some(ParameterKind::Visibility { at, .. } | ParameterKind::Lookup { at, .. }) => vec![(ElementPoint::At, *at)],
         _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dynblock::{ActionSpec, ParamPoint, ParameterSpec, add_action, add_parameter};
+
+    fn v(x: f64, y: f64) -> Vec3 {
+        Vec3::new(x, y, 0.0)
+    }
+
+    /// Erasing keeps the flags of the edges that stay (a graph from a file may set them).
+    #[test]
+    fn erasing_keeps_the_remaining_edges_flags() {
+        let mut d = Drawing::default();
+        let p = add_parameter(&mut d, "B", &ParameterSpec::Linear { base: v(0.0, 0.0), end: v(10.0, 0.0), label: None, label_offset: 0.0, grips: 2 })
+            .unwrap();
+        let a =
+            add_action(&mut d, "B", &ActionSpec::Move { parameter: p, point: ParamPoint::End, selection: vec![Handle(1)], at: v(1.0, 1.0) }).unwrap();
+        let mut g = graph(&d, "B").unwrap();
+        for e in &mut g.edges {
+            e.flags = 4;
+        }
+        let tags = g.tags();
+        if let Some(o) = object_mut(&mut d, g.handle) {
+            o.tags = tags;
+        }
+        assert_eq!(erase_elements(&mut d, "B", &[a]).unwrap(), [a]);
+        let g = graph(&d, "B").unwrap();
+        assert_eq!(g.edges.len(), 6, "the parameter's components and grips");
+        assert!(g.edges.iter().all(|e| e.flags == 4), "{:?}", g.edges);
     }
 }
