@@ -1,7 +1,7 @@
 //! Authoring dynamic blocks in the Block Editor (BPARAMETER, BACTION): parameters and actions
 //! added to a block make its references dynamic, here and in files saved for AutoCAD.
 
-use cadcraft_engine::doc::dynblock::{ActionKind, Mark, ParameterKind, dynamic_block};
+use cadcraft_engine::doc::dynblock::{ActionKind, Mark, ParameterKind, dynamic_block, parameter_objects};
 use cadcraft_engine::doc::{EntityKind, Handle};
 use cadcraft_engine::geom::{Vec2, Vec3};
 use cadcraft_engine::{Input, Session};
@@ -194,7 +194,7 @@ fn types_not_available_yet_say_so() {
     let mut s = Session::new();
     boxed(&mut s);
     s.execute("bedit", &json!({ "name": "Box" })).unwrap();
-    for t in ["polar", "xy", "rotation", "flip", "visibility", "lookup", "base", "alignment"] {
+    for t in ["polar", "xy", "rotation", "flip", "lookup", "base", "alignment"] {
         let e = s.execute("bparameter", &json!({ "type": t, "start": [0, 0], "end": [1, 0] })).unwrap_err().to_string();
         assert!(e.contains("not available yet"), "{t}: {e}");
     }
@@ -255,4 +255,169 @@ fn hostile_authoring_params_never_panic() {
     s.script("BACTION 5,0\nT\n").unwrap();
     s.input(Input::Cancel).unwrap();
     assert_eq!(s.doc().unwrap().foreign, before);
+}
+
+/// The edited block's visibility states: (name, visible objects, active parameter objects).
+fn states(s: &Session) -> Vec<(String, Vec<Handle>, Vec<Handle>)> {
+    let st = s.state().unwrap();
+    let name = st.block_edit.as_ref().map_or("Box".to_string(), |b| b.name.clone());
+    let m = dynamic_block(s.doc().unwrap(), &name).unwrap();
+    m.parameters
+        .into_iter()
+        .find_map(|p| match p.kind {
+            ParameterKind::Visibility { states, .. } => Some(states.into_iter().map(|s| (s.name, s.visible, s.active)).collect()),
+            _ => None,
+        })
+        .unwrap()
+}
+
+fn hidden(s: &Session) -> Vec<Handle> {
+    s.doc().unwrap().hidden_objects.iter().copied().collect()
+}
+
+/// A parameter's object and its grips' (what a visibility state lists as active).
+fn param_objects(s: &Session, node: i32) -> Vec<Handle> {
+    parameter_objects(&dynamic_block(s.doc().unwrap(), "Box").unwrap(), Some(node))
+}
+
+/// The states AutoCAD made in the same steps (recorded with -BVSTATE, BVHIDE and BVSHOW):
+/// Hide all hides objects and parameters; Show all shows them all; Current visibility copies;
+/// an object drawn or a parameter added shows in the state the editor shows only.
+#[test]
+fn visibility_states_follow_autocads_rules() {
+    let mut s = Session::new();
+    let (r, c, i) = boxed(&mut s);
+    let (r, c) = (h(&r), h(&c));
+    s.execute("bedit", &json!({ "name": "Box" })).unwrap();
+    assert!(s.execute("bvstate", &json!({})).is_err(), "no visibility parameter yet");
+    s.execute("bparameter", &json!({ "type": "linear", "start": [0, -1], "end": [10, -1] })).unwrap();
+    let v = s.execute("bparameter", &json!({ "type": "visibility", "at": [0, 6] })).unwrap();
+    assert_eq!(v["label"], "Visibility1");
+    let linear = param_objects(&s, 1);
+    assert_eq!(linear.len(), 3, "the parameter and its two grips");
+    assert_eq!(states(&s), [("VisibilityState0".to_string(), vec![r, c], linear.clone())]);
+
+    let out = s.execute("bvstate", &json!({ "new": "Hid", "visibility": "hide" })).unwrap();
+    assert_eq!(out, json!({ "current": "Hid", "states": ["VisibilityState0", "Hid"] }));
+    assert_eq!(hidden(&s), [r, c], "the editor shows the new state");
+    s.execute("bvshow", &json!({ "handles": [c.hex()] })).unwrap();
+    assert_eq!(hidden(&s), [r]);
+    s.execute("bvstate", &json!({ "new": "Shown", "visibility": "show" })).unwrap();
+    s.execute("bvhide", &json!({ "handles": [r.hex()] })).unwrap();
+    s.execute("bvstate", &json!({ "new": "Copy" })).unwrap();
+    s.execute("bvhide", &json!({ "handles": [c.hex()], "all": true })).unwrap();
+    s.execute("bvstate", &json!({ "set": "hid" })).unwrap();
+    let p = s.execute("bparameter", &json!({ "type": "point", "at": [2, 2] })).unwrap()["node"].as_i64().unwrap() as i32;
+    let point = param_objects(&s, p);
+    let line = s.execute("line", &json!({ "points": [[0, 0], [10, 5]] })).unwrap();
+    let line = h(&if line["handle"].is_null() { line["handles"][0].clone() } else { line["handle"].clone() });
+    s.execute("bsave", &json!({})).unwrap();
+    let want = [
+        ("VisibilityState0".to_string(), vec![r], linear.clone()),
+        ("Hid".to_string(), vec![line], point),
+        ("Shown".to_string(), vec![], linear.clone()),
+        ("Copy".to_string(), vec![], linear.clone()),
+    ];
+    assert_eq!(states(&s), want);
+
+    // Rename and delete; the last state stays.
+    s.execute("bvstate", &json!({ "rename": "Copy", "to": "Spare" })).unwrap();
+    let out = s.execute("bvstate", &json!({ "delete": ["Spare", "Shown"] })).unwrap();
+    assert_eq!(out, json!({ "current": "Hid", "states": ["VisibilityState0", "Hid"] }));
+    assert!(s.execute("bvstate", &json!({ "delete": ["VisibilityState0", "Hid"] })).is_err());
+    assert!(s.execute("bvstate", &json!({ "new": "hid" })).is_err(), "names are case-insensitive");
+    s.execute("bclose", &json!({})).unwrap();
+    assert!(s.doc().unwrap().hidden_objects.is_empty(), "the editor's hiding stays in the editor");
+
+    // A reference shows each state's objects.
+    s.execute("blocks.reference.set", &json!({ "handle": i, "name": "Visibility1", "value": "Hid" })).unwrap();
+    let d = s.doc().unwrap();
+    let EntityKind::Insert(ins) = &d.entity(h(&i)).unwrap().kind else { panic!() };
+    let shown: Vec<bool> = d.block(&ins.block).unwrap().entities.iter().map(|e| e.common.visible).collect();
+    assert_eq!(shown, [false, false, true], "only the line drawn in Hid");
+}
+
+#[test]
+fn visibility_commands_ask_as_autocad_does() {
+    let mut s = Session::new();
+    let (r, c, _) = boxed(&mut s);
+    let (r, c) = (h(&r), h(&c));
+    s.execute("bedit", &json!({ "name": "Box" })).unwrap();
+    s.script("BPARAMETER V\n").unwrap();
+    assert_eq!(s.current_prompt().unwrap().message, "Specify parameter location");
+    s.script("0,6\n").unwrap();
+    assert_eq!(s.current_prompt().unwrap().message, "Enter number of grips");
+    s.script("\n").unwrap();
+    assert!(s.running.is_none());
+    s.script("-BVSTATE\n").unwrap();
+    assert_eq!(s.current_prompt().unwrap().message, "Enter an option");
+    s.script("N\nHid\n").unwrap();
+    assert_eq!(s.current_prompt().unwrap().message, "Enter object visibility for new state");
+    s.script("H\n").unwrap();
+    assert!(s.running.is_none());
+    assert_eq!(hidden(&s), [r, c]);
+    s.script("BVSTATE\nS\n?\n").unwrap();
+    s.script("VisibilityState0\n").unwrap();
+    assert!(s.running.is_none());
+    assert!(hidden(&s).is_empty());
+    s.script("BVHIDE\n").unwrap();
+    assert_eq!(s.current_prompt().unwrap().message, "Select objects");
+    s.input(Input::Pick(vec![c])).unwrap();
+    s.script("\n").unwrap();
+    assert_eq!(s.current_prompt().unwrap().message, "Hide for current state or all visibility states");
+    s.script("A\n").unwrap();
+    assert_eq!(hidden(&s), [c]);
+    // BVMODE 1 leaves hidden objects on the canvas (dimmed there) so BVSHOW can pick them.
+    s.execute("setvar", &json!({ "name": "BVMODE", "value": 1 })).unwrap();
+    assert!(hidden(&s).is_empty());
+    s.script("BVSHOW\n").unwrap();
+    s.input(Input::Pick(vec![c])).unwrap();
+    s.script("\n\n").unwrap();
+    assert!(s.running.is_none());
+    assert_eq!(s.execute("getvar", &json!({ "name": "BVMODE" })).unwrap()["value"], json!(1));
+    s.execute("setvar", &json!({ "name": "BVMODE", "value": 0 })).unwrap();
+    assert!(hidden(&s).is_empty(), "the circle shows in the current state again");
+    s.script("BVHIDE\n").unwrap();
+    s.input(Input::Pick(vec![c])).unwrap();
+    s.script("\nA\n").unwrap();
+    assert_eq!(hidden(&s), [c]);
+    s.script("BVSTATE\nD\nHid\n").unwrap();
+    assert_eq!(states(&s), [("VisibilityState0".to_string(), vec![r], vec![])]);
+}
+
+#[test]
+fn hostile_visibility_params_never_panic() {
+    let mut s = Session::new();
+    let (r, _, _) = boxed(&mut s);
+    assert!(s.execute("bvhide", &json!({ "handles": [r] })).is_err(), "only in the Block Editor");
+    s.execute("bedit", &json!({ "name": "Box" })).unwrap();
+    s.execute("bparameter", &json!({ "type": "visibility", "at": [0, 6] })).unwrap();
+    assert!(s.execute("bparameter", &json!({ "type": "visibility", "at": [0, 6] })).is_err(), "one per block");
+    let many: Vec<Value> = (0..20_001).map(|_| r.clone()).collect();
+    for (cmd, p) in [
+        ("bvstate", json!(null)),
+        ("bvstate", json!({ "new": "" })),
+        ("bvstate", json!({ "new": 5 })),
+        ("bvstate", json!({ "new": "X", "visibility": "sideways" })),
+        ("bvstate", json!({ "set": "Nope" })),
+        ("bvstate", json!({ "delete": 7 })),
+        ("bvstate", json!({ "delete": [] })),
+        ("bvstate", json!({ "delete": "Nope" })),
+        ("bvstate", json!({ "rename": "VisibilityState0" })),
+        ("bvstate", json!({ "rename": "Nope", "to": "X" })),
+        ("bvhide", json!({ "handles": [] })),
+        ("bvhide", json!({ "handles": ["zz"] })),
+        ("bvhide", json!({ "handles": ["FFFFFF"] })),
+        ("bvhide", json!({ "handles": many })),
+        ("bvshow", json!({ "handles": [r], "all": "yes" })),
+        ("bparameter", json!({ "type": "visibility", "at": [f64::MAX, 0], "grips": 9 })),
+    ] {
+        let _ = s.execute(cmd, &p);
+    }
+    for i in 0..50 {
+        s.execute("bvstate", &json!({ "new": format!("S{i}"), "visibility": "show" })).unwrap();
+    }
+    s.script("BVSTATE\nD\n,,,\n").unwrap();
+    s.input(Input::Cancel).unwrap();
+    assert!(s.running.is_none());
 }

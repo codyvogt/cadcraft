@@ -14,7 +14,7 @@ use cadcraft_geom::{Vec2, Vec3};
 use crate::foreign::ForeignObject;
 use crate::{Drawing, EntityStore, Handle, RawTag};
 
-use super::{ParameterKind, dynamic_block};
+use super::{ParameterKind, VisibilityState, dynamic_block};
 
 /// The graph `AcDbEvalGraph` is extended only up to this many nodes.
 const MAX_NODES: usize = super::MAX_NODES;
@@ -38,6 +38,18 @@ pub enum ParameterSpec {
     Linear { base: Vec3, end: Vec3, label: Option<String>, label_offset: f64, grips: u8 },
     /// A position (Position1), its label at `label_at`, with 0 or 1 grip.
     Point { at: Vec3, label: Option<String>, label_at: Vec3, grips: u8 },
+    /// Named visibility states (Visibility1) of `objects`, at `at`, with 0 or 1 grip: one state,
+    /// `VisibilityState0`, showing them all. A block has one at most.
+    Visibility { at: Vec3, label: Option<String>, objects: Vec<Handle>, grips: u8 },
+}
+
+/// What a grip is: a linear parameter's (pointing along `Vec3`), a point's, or a visibility
+/// parameter's (a list to pick from).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum GripKind {
+    Linear(Vec3),
+    Xy,
+    Visibility,
 }
 
 /// Which point of a two-point parameter an action follows.
@@ -325,26 +337,36 @@ impl<'a> Author<'a> {
 
     /// A grip at `at` with its two location components (`x_name`, `y_name`, both valued
     /// `value`), linked after parameter node `param`: the grip's graph id.
-    fn grip(&mut self, param: i32, at: Vec3, name: &str, [x_name, y_name]: [&str; 2], value: f64, linear: Option<Vec3>) -> i32 {
+    fn grip(&mut self, param: i32, at: Vec3, name: &str, [x_name, y_name]: [&str; 2], value: f64, kind: GripKind) -> i32 {
         let (gh, gid) = (self.d.new_handle(), self.graph.next_id());
         let (xid, yid) = (gid.saturating_add(1), gid.saturating_add(2));
         let mut tags = element_head(gh, self.graph.handle, gid, name, 0);
         tags.extend([tag(100, "AcDbBlockGrip"), tag(91, xid), tag(92, yid)]);
         point(&mut tags, 1010, at);
-        tags.extend([tag(280, 1), tag(93, -1)]);
-        let kind = match linear {
-            Some(dir) => {
+        // A visibility grip is the only one AutoCAD writes 280 0 on.
+        tags.extend([tag(280, i32::from(kind != GripKind::Visibility)), tag(93, -1)]);
+        let dxf = match kind {
+            GripKind::Linear(dir) => {
                 tags.extend([tag(100, "AcDbBlockLinearGrip"), real(140, dir.x), real(141, dir.y), real(142, dir.z)]);
                 self.class("BLOCKLINEARGRIP", "AcDbBlockLinearGrip");
                 "BLOCKLINEARGRIP"
             }
-            None => {
+            GripKind::Xy => {
                 tags.push(tag(100, "AcDbBlockXYGrip"));
                 self.class("BLOCKXYGRIP", "AcDbBlockXYGrip");
                 "BLOCKXYGRIP"
             }
+            GripKind::Visibility => {
+                tags.push(tag(100, "AcDbBlockVisibilityGrip"));
+                self.class("BLOCKVISIBILITYGRIP", "AcDbBlockVisibilityGrip");
+                "BLOCKVISIBILITYGRIP"
+            }
         };
-        let grip = self.node(kind, gh, gid, tags);
+        let grip = self.node(dxf, gh, gid, tags);
+        // AutoCAD links a visibility grip to its parameter before the location components.
+        if kind == GripKind::Visibility {
+            self.graph.link(grip, param, 1);
+        }
         self.class("BLOCKGRIPLOCATIONCOMPONENT", "AcDbBlockGripExpr");
         // Each component names the parameter it reads (its graph id).
         let owner = self.graph.nodes.iter().find(|n| n.index == param).map_or(0, |n| n.id);
@@ -355,7 +377,9 @@ impl<'a> Author<'a> {
             let c = self.node("BLOCKGRIPLOCATIONCOMPONENT", h, id, tags);
             self.graph.link(param, c, 1);
         }
-        self.graph.link(grip, param, 2);
+        if kind != GripKind::Visibility {
+            self.graph.link(grip, param, 2);
+        }
         gid
     }
 
@@ -432,8 +456,10 @@ pub fn add_parameter(d: &mut Drawing, name: &str, spec: &ParameterSpec) -> Resul
             let param = a.graph.add_node(id, h);
             let first_grip = a.new.len();
             let dir = *end - *base;
-            let end_grip = if *grips >= 1 { a.grip(param, *end, "End Grip", ["UpdatedEndX", "UpdatedEndY"], UNSET, Some(dir)) } else { 0 };
-            let base_grip = if *grips >= 2 { a.grip(param, *base, "Base Grip", ["UpdatedBaseX", "UpdatedBaseY"], 0.0, Some(-dir)) } else { 0 };
+            let end_grip =
+                if *grips >= 1 { a.grip(param, *end, "End Grip", ["UpdatedEndX", "UpdatedEndY"], UNSET, GripKind::Linear(dir)) } else { 0 };
+            let base_grip =
+                if *grips >= 2 { a.grip(param, *base, "Base Grip", ["UpdatedBaseX", "UpdatedBaseY"], 0.0, GripKind::Linear(-dir)) } else { 0 };
             let mut tags = element_head(h, a.graph.handle, id, &element, if *grips == 2 { 32 } else { 1 });
             tags.extend([tag(100, "AcDbBlockParameter"), tag(280, 1), tag(281, 0), tag(100, "AcDbBlock2PtParameter")]);
             point(&mut tags, 1010, *base);
@@ -475,7 +501,7 @@ pub fn add_parameter(d: &mut Drawing, name: &str, spec: &ParameterSpec) -> Resul
             let (h, id) = (a.d.new_handle(), a.graph.next_id());
             let param = a.graph.add_node(id, h);
             let first_grip = a.new.len();
-            let grip = if *grips == 1 { a.grip(param, *at, "Grip", ["UpdatedX", "UpdatedY"], 0.0, None) } else { 0 };
+            let grip = if *grips == 1 { a.grip(param, *at, "Grip", ["UpdatedX", "UpdatedY"], 0.0, GripKind::Xy) } else { 0 };
             let mut tags = element_head(h, a.graph.handle, id, &element, if *grips == 1 { 0 } else { 1 });
             tags.extend([tag(100, "AcDbBlockParameter"), tag(280, 1), tag(281, 0), tag(100, "AcDbBlock1PtParameter")]);
             point(&mut tags, 1010, *at);
@@ -492,7 +518,149 @@ pub fn add_parameter(d: &mut Drawing, name: &str, spec: &ParameterSpec) -> Resul
             a.finish();
             Ok(id)
         }
+        ParameterSpec::Visibility { at, label, objects, grips } => {
+            if !finite(*at) {
+                return Err("Invalid point.".into());
+            }
+            if *grips > 1 {
+                return Err("A visibility parameter has 0 or 1 grip.".into());
+            }
+            if objects.len() > MAX_ACTION_ITEMS {
+                return Err(format!("A visibility parameter controls at most {MAX_ACTION_ITEMS} objects."));
+            }
+            let record = name.trim().to_ascii_uppercase();
+            let m = dynamic_block(d, &record);
+            if m.as_ref().is_some_and(|m| m.parameters.iter().any(|p| matches!(p.kind, ParameterKind::Visibility { .. }))) {
+                return Err("The block already has a visibility parameter.".into());
+            }
+            // The other parameters and their grips show in the first state.
+            let active: Vec<Handle> = m.map(|m| parameter_objects(&m, None)).unwrap_or_default();
+            let label = label.clone().unwrap_or_else(|| free_label(d, &record, "Visibility"));
+            let mut a = Author::open(d, name)?;
+            let element = a.element_name("Visibility State");
+            let (h, id) = (a.d.new_handle(), a.graph.next_id());
+            let param = a.graph.add_node(id, h);
+            let first_grip = a.new.len();
+            let grip = if *grips == 1 { a.grip(param, *at, "Grip", ["UpdatedX", "UpdatedY"], 0.0, GripKind::Visibility) } else { 0 };
+            let mut tags = element_head(h, a.graph.handle, id, &element, 16);
+            tags.extend([tag(100, "AcDbBlockParameter"), tag(280, 1), tag(281, 0), tag(100, "AcDbBlock1PtParameter")]);
+            point(&mut tags, 1010, *at);
+            tags.extend([tag(93, grip), tag(170, 0), tag(171, 0)]);
+            let state = VisibilityState { name: "VisibilityState0".into(), visible: objects.clone(), active };
+            tags.extend(visibility_tags(&label, "", objects, std::slice::from_ref(&state)));
+            a.new.insert(first_grip, ForeignObject { handle: h, kind: "BLOCKVISIBILITYPARAMETER".into(), tags });
+            a.class("BLOCKVISIBILITYPARAMETER", "AcDbBlockVisibilityParameter");
+            a.finish();
+            Ok(id)
+        }
     }
+}
+
+/// Most visibility states one parameter is written with.
+pub const MAX_VISIBILITY_STATES: usize = 1_000;
+
+/// The visibility parameter's own section: label, description, the objects it controls and its
+/// states (each the objects shown in it and the parameters and grips active in it).
+fn visibility_tags(label: &str, description: &str, controlled: &[Handle], states: &[VisibilityState]) -> Vec<RawTag> {
+    let mut out = vec![tag(100, "AcDbBlockVisibilityParameter"), tag(281, 1), tag(301, label), tag(302, description), tag(91, 0)];
+    out.push(tag(93, controlled.len()));
+    out.extend(controlled.iter().map(|h| tag(331, h.hex())));
+    out.push(tag(92, states.len()));
+    for s in states {
+        out.extend([tag(303, &s.name), tag(94, s.visible.len())]);
+        out.extend(s.visible.iter().map(|h| tag(332, h.hex())));
+        out.push(tag(95, s.active.len()));
+        out.extend(s.active.iter().map(|h| tag(333, h.hex())));
+    }
+    out
+}
+
+/// The objects of block `m`'s parameters other than its visibility parameter, and their grips
+/// (all of them, or parameter `only`'s): what a visibility state lists as active in it.
+pub fn parameter_objects(m: &super::DynamicBlock, only: Option<i32>) -> Vec<Handle> {
+    let grip = |id: &i32| m.grip_objects.iter().find(|(g, _)| g == id).map(|(_, h)| *h);
+    m.parameters
+        .iter()
+        .filter(|p| !matches!(p.kind, ParameterKind::Visibility { .. }) && only.is_none_or(|n| n == p.node))
+        .flat_map(|p| std::iter::once(p.handle).chain(p.grips.iter().filter(|g| **g != 0).filter_map(grip)))
+        .collect()
+}
+
+/// Keep block `name`'s visibility parameter in step with `objects`, the block's objects: as
+/// AutoCAD does, one it doesn't control yet (drawn in the Block Editor) becomes controlled and
+/// shown in state `current` only (the first state when `None` or not found), and objects no
+/// longer in the block leave its lists. Nothing happens without a visibility parameter.
+pub fn adopt_objects(d: &mut Drawing, name: &str, objects: &[Handle], current: Option<&str>) -> Result<(), String> {
+    let Some(m) = dynamic_block(d, name) else { return Ok(()) };
+    let Some(ParameterKind::Visibility { controlled, states, .. }) =
+        m.parameters.into_iter().map(|p| p.kind).find(|k| matches!(k, ParameterKind::Visibility { .. }))
+    else {
+        return Ok(());
+    };
+    let alive: std::collections::HashSet<Handle> = objects.iter().copied().collect();
+    let known: std::collections::HashSet<Handle> = controlled.iter().copied().collect();
+    let new: Vec<Handle> = objects.iter().filter(|h| !known.contains(h)).copied().collect();
+    let gone = controlled.iter().any(|h| !alive.contains(h)) || states.iter().any(|s| s.visible.iter().any(|h| !alive.contains(h)));
+    if new.is_empty() && !gone {
+        return Ok(());
+    }
+    let at = current.and_then(|c| states.iter().position(|s| s.name.eq_ignore_ascii_case(c))).unwrap_or(0);
+    let mut controlled: Vec<Handle> = controlled.into_iter().filter(|h| alive.contains(h)).collect();
+    controlled.extend(new.iter().copied());
+    let mut states = states;
+    for (i, s) in states.iter_mut().enumerate() {
+        s.visible.retain(|h| alive.contains(h));
+        if i == at {
+            s.visible.extend(new.iter().copied());
+        }
+    }
+    set_visibility(d, name, &controlled, &states)
+}
+
+/// Rewrite block `name`'s visibility parameter: the objects it `controlled` and its `states`
+/// (in order; the first is the one new references start in).
+pub fn set_visibility(d: &mut Drawing, name: &str, controlled: &[Handle], states: &[VisibilityState]) -> Result<(), String> {
+    if states.is_empty() {
+        return Err("A visibility parameter needs at least one visibility state.".into());
+    }
+    if states.len() > MAX_VISIBILITY_STATES {
+        return Err(format!("A visibility parameter has at most {MAX_VISIBILITY_STATES} states."));
+    }
+    let too_many = |v: &[Handle]| v.len() > MAX_ACTION_ITEMS;
+    if too_many(controlled) || states.iter().any(|s| too_many(&s.visible) || too_many(&s.active)) {
+        return Err(format!("A visibility state lists at most {MAX_ACTION_ITEMS} objects."));
+    }
+    for (i, s) in states.iter().enumerate() {
+        if s.name.trim().is_empty() {
+            return Err("A visibility state needs a name.".into());
+        }
+        if states.iter().take(i).any(|o| o.name.eq_ignore_ascii_case(&s.name)) {
+            return Err(format!("Visibility state \"{}\" already exists.", s.name));
+        }
+    }
+    let m = dynamic_block(d, name).ok_or("The block has no visibility parameter.")?;
+    let (handle, label, description) = m
+        .parameters
+        .iter()
+        .find_map(|p| match &p.kind {
+            ParameterKind::Visibility { label, description, .. } => Some((p.handle, label.clone(), description.clone())),
+            _ => None,
+        })
+        .ok_or("The block has no visibility parameter.")?;
+    let f = std::sync::Arc::make_mut(&mut d.foreign);
+    let o = f.objects.iter_mut().find(|o| o.handle == handle).ok_or("The block's visibility parameter is missing.")?;
+    let at = o
+        .tags
+        .iter()
+        .position(|t| t.code == 100 && t.value.eq_ignore_ascii_case("AcDbBlockVisibilityParameter"))
+        .ok_or("The block's visibility parameter can't be changed.")?;
+    // Its section is the object's last; anything after it would be a layout this doesn't know.
+    if o.tags.iter().skip(at + 1).any(|t| t.code == 100) {
+        return Err("The block's visibility parameter can't be changed.".into());
+    }
+    o.tags.truncate(at);
+    o.tags.extend(visibility_tags(&label, &description, controlled, states));
+    Ok(())
 }
 
 /// Add action `spec` to block `name` (any case); its graph id. The parameter it follows must be

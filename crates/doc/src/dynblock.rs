@@ -31,7 +31,10 @@ pub use copy::{copy_definition, remap_handles, restore_definition};
 pub use grips::{DynGrip, GripPart, GripShape, grips};
 pub use marks::{Mark, marks};
 pub use reference::{CustomProperty, Reference, Value, custom_properties, reference};
-pub use write::{ActionSpec, MAX_ACTION_ITEMS, ParamPoint, ParameterSpec, add_action, add_parameter, tag_elements};
+pub use write::{
+    ActionSpec, MAX_ACTION_ITEMS, MAX_VISIBILITY_STATES, ParamPoint, ParameterSpec, add_action, add_parameter, adopt_objects, parameter_objects,
+    set_visibility, tag_elements,
+};
 
 /// Most objects one evaluation graph is read with.
 const MAX_NODES: usize = 10_000;

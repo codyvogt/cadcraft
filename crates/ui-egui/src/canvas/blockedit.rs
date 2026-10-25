@@ -1,12 +1,17 @@
 //! The Block Editor on the canvas (BEDIT): a tint over the drawing area so the editor can't be
 //! mistaken for the drawing, the block's base point marked at the origin, the block's
 //! parameters and actions (BPARAMETER, BACTION) drawn as the editor shows them, and a bar with
-//! the block's name and Save Block, Save Block As and Close Block Editor.
+//! the block's name and Save Block, Save Block As and Close Block Editor. A block with visibility
+//! states gets the state shown (picked from a list, as AutoCAD's Visibility panel offers it),
+//! Visibility States, Make Visible and Make Invisible; with BVMODE 1 the objects the state hides
+//! are drawn dimmed.
 
 use std::sync::Arc;
 
-use cadcraft_engine::doc::dynblock::Mark;
+use cadcraft_engine::doc::Handle;
+use cadcraft_engine::doc::dynblock::{Mark, ParameterKind, dynamic_block};
 use cadcraft_engine::geom::Vec2;
+use cadcraft_render::DisplayList;
 use egui::{Align2, Color32, FontId, Painter, Pos2, Rect, RichText, Shape, Stroke, vec2};
 use serde_json::json;
 
@@ -22,6 +27,59 @@ fn id() -> egui::Id {
 fn editing(app: &CadApp) -> Option<(String, bool)> {
     let st = app.session.state().ok()?;
     st.block_editor().map(|n| (n.to_string(), st.block_unsaved()))
+}
+
+/// The edited block's visibility states: their names, the one shown, and what it hides.
+#[derive(Clone, Default)]
+struct States {
+    names: Vec<String>,
+    current: String,
+    hidden: Vec<Handle>,
+}
+
+/// [`States`] when the block has a visibility parameter, worked out once per drawing revision
+/// and state shown.
+fn states(app: &CadApp, ctx: &egui::Context) -> Option<Arc<States>> {
+    type Cache = Option<((u64, u64, Option<String>), Option<Arc<States>>)>;
+    let st = app.session.state().ok()?;
+    let be = st.block_edit.as_ref()?;
+    let key = (st.uid, st.revision, be.visibility.clone());
+    let cid = egui::Id::unique("cadcraft-block-editor-states");
+    if let Some((k, v)) = ctx.data(|d| d.get_temp::<Cache>(cid)).flatten()
+        && k == key
+    {
+        return v;
+    }
+    let names: Option<Vec<String>> = dynamic_block(&st.doc, &be.name).and_then(|m| {
+        m.parameters.into_iter().find_map(|p| match p.kind {
+            ParameterKind::Visibility { states, .. } => Some(states.into_iter().map(|s| s.name).collect()),
+            _ => None,
+        })
+    });
+    let v = names.zip(be.visibility_state(&st.doc)).map(|(names, (current, hidden))| Arc::new(States { names, current, hidden }));
+    ctx.data_mut(|d| d.insert_temp::<Cache>(cid, Some((key, v.clone()))));
+    v
+}
+
+/// The objects the visibility state hides, dimmed (BVMODE 1 leaves them on the canvas to pick).
+fn paint_dimmed(app: &CadApp, ctx: &egui::Context, p: &Painter, xf: &Xf, hidden: &[Handle]) {
+    type Cache = Option<((u64, u64, usize, i64), Arc<DisplayList>)>;
+    let Ok(st) = app.session.state() else { return };
+    let band = xf.scale.max(1e-300).log2().round() as i64;
+    let key = (st.uid, st.revision, hidden.len(), band);
+    let cid = egui::Id::unique("cadcraft-block-editor-dimmed");
+    let list = match ctx.data(|d| d.get_temp::<Cache>(cid)).flatten() {
+        Some((k, l)) if k == key => l,
+        _ => {
+            let opts = cadcraft_render::Options { tolerance: 0.5 / xf.scale.max(1e-12), ..Default::default() };
+            let l = Arc::new(cadcraft_render::build_entities(&st.doc, hidden.iter().filter_map(|h| st.doc.entity(*h)).map(|e| e.as_ref()), &opts));
+            ctx.data_mut(|d| d.insert_temp::<Cache>(cid, Some((key, l.clone()))));
+            l
+        }
+    };
+    // The canvas colour drawn over them, a little wider, fades them toward the background.
+    let all: Vec<usize> = (0..list.prims.len()).collect();
+    super::draw_highlight(p, xf, &list, &all, Tokens::get().canvas.gamma_multiply(0.7), super::Look { width: 2.0, dashed: false });
 }
 
 /// Tint the drawing area while the Block Editor is open (under the drawing).
@@ -44,7 +102,15 @@ pub(super) fn paint(app: &mut CadApp, ctx: &egui::Context, p: &egui::Painter, xf
         p.line_segment([o - vec2(0.0, 12.0), o + vec2(0.0, 12.0)], st);
     }
     paint_marks(app, ctx, p, xf);
+    let vis = states(app, ctx);
+    if app.session.settings.bvmode
+        && let Some(v) = &vis
+        && !v.hidden.is_empty()
+    {
+        paint_dimmed(app, ctx, p, xf, &v.hidden);
+    }
     let mut action: Option<(&str, bool)> = None;
+    let mut pick: Option<String> = None;
     egui::Area::new(id()).order(egui::Order::Foreground).pivot(egui::Align2::CENTER_TOP).fixed_pos(rect.center_top() + vec2(0.0, 8.0)).show(
         ctx,
         |ui| {
@@ -67,10 +133,32 @@ pub(super) fn paint(app: &mut CadApp, ctx: &egui::Context, p: &egui::Painter, xf
                     if ui.button(crate::tl!("Close Block Editor")).clicked() {
                         action = Some(("bclose", true));
                     }
+                    if let Some(v) = &vis {
+                        ui.separator();
+                        egui::ComboBox::from_id_salt("cadcraft-block-editor-state").selected_text(v.current.as_str()).show_ui(ui, |ui| {
+                            for n in &v.names {
+                                if ui.selectable_label(*n == v.current, n.as_str()).clicked() && *n != v.current {
+                                    pick = Some(n.clone());
+                                }
+                            }
+                        });
+                        if ui.button(crate::tl!("Visibility States")).clicked() {
+                            action = Some(("bvstate", true));
+                        }
+                        if ui.button(crate::tl!("Make Visible")).clicked() {
+                            action = Some(("bvshow", true));
+                        }
+                        if ui.button(crate::tl!("Make Invisible")).clicked() {
+                            action = Some(("bvhide", true));
+                        }
+                    }
                 });
             });
         },
     );
+    if let Some(n) = pick {
+        let _ = app.run("bvstate", json!({ "set": n }));
+    }
     match action {
         // Prompting commands start like a menu item; BSAVE needs no answer.
         Some((id, true)) => app.start(id),
@@ -81,12 +169,14 @@ pub(super) fn paint(app: &mut CadApp, ctx: &egui::Context, p: &egui::Painter, xf
     }
 }
 
-/// The edited block's parameters and actions, worked out once per drawing revision.
+/// The edited block's parameters and actions, worked out once per drawing revision and
+/// visibility state shown.
 fn marks(app: &CadApp, ctx: &egui::Context) -> Arc<Vec<Mark>> {
-    type Cache = Option<((u64, u64), Arc<Vec<Mark>>)>;
+    type Cache = Option<((u64, u64, Option<String>), Arc<Vec<Mark>>)>;
     let Ok(st) = app.session.state() else { return Arc::default() };
     let Some(be) = &st.block_edit else { return Arc::default() };
-    let key = (st.uid, st.revision);
+    // The visibility state shown decides which parameters show.
+    let key = (st.uid, st.revision, be.visibility.clone());
     let cid = egui::Id::unique("cadcraft-block-editor-marks");
     if let Some((k, m)) = ctx.data(|d| d.get_temp::<Cache>(cid)).flatten()
         && k == key

@@ -60,6 +60,8 @@ pub struct BlockEdit {
     base: Vec2,
     /// The editor is open on the drawing itself ([`CURRENT_DRAWING`]).
     pub current: bool,
+    /// The visibility state the editor shows (BVSTATE Set); `None` for the block's first.
+    pub visibility: Option<String>,
 }
 
 /// Why a block can't be opened in the Block Editor, if it can't.
@@ -114,6 +116,14 @@ impl BlockEdit {
         use cadcraft_doc::dynblock::Mark;
         let off = self.base.to3(0.0);
         let mut out = cadcraft_doc::dynblock::marks(editor, &self.name);
+        // Parameters the visibility state shown leaves out aren't drawn, as in AutoCAD.
+        let inactive = self.inactive_parameters(editor);
+        if !inactive.is_empty() {
+            out.retain(|m| match m {
+                Mark::Linear { node, .. } | Mark::Point { node, .. } | Mark::Parameter { node, .. } => !inactive.contains(node),
+                Mark::Action { .. } => true,
+            });
+        }
         for m in &mut out {
             match m {
                 Mark::Linear { base, end, .. } => (*base, *end) = (*base - off, *end - off),
@@ -122,6 +132,51 @@ impl BlockEdit {
             }
         }
         out
+    }
+
+    /// The visibility state the editor shows: its name, the objects it hides (none without a
+    /// visibility parameter). `editor` is the editor's drawing.
+    pub fn visibility_state(&self, editor: &Drawing) -> Option<(String, Vec<cadcraft_doc::Handle>)> {
+        use cadcraft_doc::dynblock::ParameterKind;
+        let m = cadcraft_doc::dynblock::dynamic_block(editor, &self.name)?;
+        let (controlled, states) = m.parameters.into_iter().find_map(|p| match p.kind {
+            ParameterKind::Visibility { controlled, states, .. } => Some((controlled, states)),
+            _ => None,
+        })?;
+        let state = self.visibility.as_deref().and_then(|v| states.iter().find(|s| s.name.eq_ignore_ascii_case(v))).or(states.first())?;
+        let shown: std::collections::HashSet<_> = state.visible.iter().copied().collect();
+        Some((state.name.clone(), controlled.into_iter().filter(|h| !shown.contains(h)).collect()))
+    }
+
+    /// Graph ids of the parameters the visibility state the editor shows doesn't list as active
+    /// (the visibility parameter itself always shows).
+    fn inactive_parameters(&self, editor: &Drawing) -> Vec<i32> {
+        use cadcraft_doc::dynblock::ParameterKind;
+        let Some(m) = cadcraft_doc::dynblock::dynamic_block(editor, &self.name) else { return Vec::new() };
+        let Some(states) = m.parameters.iter().find_map(|p| match &p.kind {
+            ParameterKind::Visibility { states, .. } => Some(states),
+            _ => None,
+        }) else {
+            return Vec::new();
+        };
+        let Some(state) = self.visibility.as_deref().and_then(|v| states.iter().find(|s| s.name.eq_ignore_ascii_case(v))).or(states.first()) else {
+            return Vec::new();
+        };
+        m.parameters
+            .iter()
+            .filter(|p| !matches!(p.kind, ParameterKind::Visibility { .. }) && !state.active.contains(&p.handle))
+            .map(|p| p.node)
+            .collect()
+    }
+
+    /// Hide in `editor` (the editor's drawing) what the visibility state it shows hides, and show
+    /// the rest, as AutoCAD's Block Editor does with BVMODE 0; with `bvmode` (1) hide nothing.
+    pub fn show_visibility_state(&self, editor: &mut Drawing, bvmode: bool) {
+        let hidden = if bvmode { Vec::new() } else { self.visibility_state(editor).map(|(_, h)| h).unwrap_or_default() };
+        let hidden: std::collections::BTreeSet<_> = hidden.into_iter().filter(|h| editor.model.get(*h).is_some()).collect();
+        if editor.hidden_objects != hidden {
+            editor.hidden_objects = hidden;
+        }
     }
 
     /// The editor's objects in block coordinates, ready to be the block's: unchanged objects are
@@ -210,6 +265,9 @@ impl BlockEdit {
             remap = cadcraft_doc::dynblock::copy_definition(&mut d, &self.name, name, &mut entities);
             cadcraft_doc::dynblock::restore_definition(&mut d, host, &self.name);
         }
+        // Objects drawn in the editor show in the visibility state it shows only, as in AutoCAD.
+        let handles: Vec<cadcraft_doc::Handle> = entities.iter().map(|e| e.handle).collect();
+        cadcraft_doc::dynblock::adopt_objects(&mut d, name, &handles, self.visibility.as_deref()).map_err(EngineError::Other)?;
         // A dynamic block's objects carry element tags, which its references' copies are paired
         // with; objects added in the editor get theirs here.
         cadcraft_doc::dynblock::tag_elements(&mut d, name, &mut entities);
@@ -271,6 +329,12 @@ impl DocState {
     /// Open the Block Editor on block `name` (BEDIT).
     /// With `create`, a name no block has yet starts a new, empty block, which BSAVE creates.
     pub fn open_block_editor(&mut self, name: &str, create: bool) -> Result<()> {
+        self.open_block_editor_with(name, create, false)
+    }
+
+    /// [`DocState::open_block_editor`] with BVMODE `bvmode`: objects the first visibility state
+    /// hides are hidden (false) or left shown for the canvas to dim (true).
+    pub fn open_block_editor_with(&mut self, name: &str, create: bool, bvmode: bool) -> Result<()> {
         if let Some(open) = self.block_editor() {
             return Err(EngineError::Other(format!("The Block Editor is already open on \"{open}\"; close it first (BCLOSE).")));
         }
@@ -284,6 +348,7 @@ impl DocState {
                 original: EntityStore::new(),
                 base: Vec2::ZERO,
                 current: true,
+                visibility: None,
             });
             return Ok(());
         }
@@ -304,9 +369,20 @@ impl DocState {
         d.constraints.clear();
         d.hidden_objects.clear();
         let host = Box::new(self.clone());
-        let editor = Arc::new(d);
-        self.doc = editor.clone();
-        self.enter_block_editor(BlockEdit { name: block.name.clone(), host, saved: editor, original: block.entities.clone(), base, current: false });
+        let mut be = BlockEdit {
+            name: block.name.clone(),
+            host,
+            saved: self.doc.clone(),
+            original: block.entities.clone(),
+            base,
+            current: false,
+            visibility: None,
+        };
+        // The editor shows the block's first visibility state (its other objects hidden).
+        be.show_visibility_state(&mut d, bvmode);
+        be.saved = Arc::new(d);
+        self.doc = be.saved.clone();
+        self.enter_block_editor(be);
         Ok(())
     }
 
@@ -331,6 +407,15 @@ impl DocState {
     /// (BSAVEAS), which the editor then edits. One undo step in the drawing.
     pub fn save_block_editor(&mut self, as_name: Option<&str>) -> Result<()> {
         let Some(be) = &self.block_edit else { return Err(EngineError::Other("The Block Editor is not open.".into())) };
+        // Objects drawn in the editor join its visibility states here too, so the editor and the
+        // block agree.
+        let handles: Vec<cadcraft_doc::Handle> = self.doc.model.iter().map(|e| e.handle).collect();
+        let mut d = (*self.doc).clone();
+        cadcraft_doc::dynblock::adopt_objects(&mut d, &be.name, &handles, be.visibility.as_deref()).map_err(EngineError::Other)?;
+        if !Arc::ptr_eq(&d.foreign, &self.doc.foreign) {
+            self.doc = Arc::new(d);
+        }
+        let Some(be) = &self.block_edit else { return Ok(()) };
         let name = as_name.unwrap_or(&be.name).to_string();
         let (d, remap) = be.compose_mapped(&self.doc, &name)?;
         let original = d.block(&name).map(|b| b.entities.clone()).unwrap_or_default();
@@ -403,6 +488,22 @@ impl DocState {
         self.views = host.views;
         self.view_history = host.view_history;
         self.revision += 1;
+        Ok(())
+    }
+}
+
+impl crate::Session {
+    /// Show in the Block Editor what the visibility state it shows shows (BVSTATE): the other
+    /// objects hidden, or with BVMODE 1 left for the canvas to dim. Nothing outside the editor.
+    pub(crate) fn refresh_block_visibility(&mut self) -> Result<()> {
+        let bvmode = self.settings.bvmode;
+        let st = self.state()?;
+        let Some(be) = &st.block_edit else { return Ok(()) };
+        let hidden = if bvmode { Vec::new() } else { be.visibility_state(&st.doc).map(|(_, h)| h).unwrap_or_default() };
+        let hidden: std::collections::BTreeSet<_> = hidden.into_iter().filter(|h| st.doc.model.get(*h).is_some()).collect();
+        if hidden != st.doc.hidden_objects {
+            self.doc_mut()?.hidden_objects = hidden;
+        }
         Ok(())
     }
 }

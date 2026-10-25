@@ -21,7 +21,7 @@ pub(super) fn specs() -> Vec<CommandSpec> {
         CommandSpec::new("bparameter", "Parameter", run_bparameter)
             .alias(&["-bparameter"])
             .params(
-                "{type: \"linear\"|\"point\", linear: start: [x,y], end: [x,y], labelAt?: [x,y] (where the label goes; default on the line); point: at: [x,y], labelAt?: [x,y]; label?: property name (default Distance1/Position1…), grips?: 0|1|2 (linear, default 2) or 0|1 (point, default 1)} → {node, element, label} (editor coordinates)",
+                "{type: \"linear\"|\"point\"|\"visibility\", linear: start: [x,y], end: [x,y], labelAt?: [x,y] (where the label goes; default on the line); point: at: [x,y], labelAt?: [x,y]; visibility: at: [x,y] (one state, VisibilityState0, showing every object; one per block); label?: property name (default Distance1/Position1/Visibility1…), grips?: 0|1|2 (linear, default 2) or 0|1 (point, visibility, default 1)} → {node, element, label} (editor coordinates)",
             )
             .enabled(authoring)
             .interactive(|_| Ok(Box::new(BparameterM::default()))),
@@ -94,12 +94,22 @@ fn run_bparameter(s: &mut Session, p: &Value) -> Result<Value> {
             let label_at = point_param(p, "labelAt").unwrap_or(at);
             ParameterSpec::Point { at: to_block(at, base), label, label_at: to_block(label_at, base), grips: grips_param("bparameter", p, 1, 1)? }
         }
-        Some(other) if ["alignment", "base", "polar", "xy", "rotation", "flip", "visibility", "lookup"].contains(&other) => {
+        Some("visibility") => {
+            let at = point_param(p, "at").ok_or_else(|| bad("bparameter", "`at` ([x, y]) is required"))?;
+            let objects = s.doc()?.model.iter().map(|e| e.handle).collect();
+            ParameterSpec::Visibility { at: to_block(at, base), label, objects, grips: grips_param("bparameter", p, 1, 1)? }
+        }
+        Some(other) if ["alignment", "base", "polar", "xy", "rotation", "flip", "lookup"].contains(&other) => {
             return Err(bad("bparameter", format!("{other} parameters are not available yet")));
         }
-        _ => return Err(bad("bparameter", "`type` is \"linear\" or \"point\"")),
+        _ => return Err(bad("bparameter", "`type` is \"linear\", \"point\" or \"visibility\"")),
     };
+    let visibility = matches!(spec, ParameterSpec::Visibility { .. });
     let node = add_parameter(s.doc_mut()?, &block, &spec).map_err(|e| bad("bparameter", e))?;
+    // A parameter added after visibility states shows its grips in the state the editor shows.
+    if !visibility {
+        super::bvstate::parameter_added(s, node)?;
+    }
     let m = cadcraft_doc::dynblock::dynamic_block(s.doc()?, &block);
     let made = m.as_ref().and_then(|m| m.parameters.iter().find(|p| p.node == node));
     Ok(json!({ "node": node, "element": made.map(|p| p.element.clone()), "label": made.and_then(|p| p.kind.label().map(str::to_string)) }))
@@ -321,6 +331,7 @@ enum PStage {
     Location,
     PointLabel,
     PointGrips,
+    VisibilityGrips,
     /// Typing the property name, then back to the stage it was asked at.
     Label(&'static str),
 }
@@ -330,6 +341,7 @@ enum PStage {
 struct BparameterM {
     stage: PStage,
     linear: bool,
+    visibility: bool,
     start: Vec2,
     end: Vec2,
     label_at: Vec2,
@@ -352,7 +364,9 @@ const TYPES: &[(&str, &str)] = &[
 impl BparameterM {
     fn make(&self, s: &mut Session, grips: u8) -> Result<Step> {
         let label = self.label.clone();
-        let p = if self.linear {
+        let p = if self.visibility {
+            json!({ "type": "visibility", "at": [self.start.x, self.start.y], "label": label, "grips": grips })
+        } else if self.linear {
             json!({ "type": "linear", "start": [self.start.x, self.start.y], "end": [self.end.x, self.end.y], "labelAt": [self.label_at.x, self.label_at.y], "label": label, "grips": grips })
         } else {
             json!({ "type": "point", "at": [self.start.x, self.start.y], "labelAt": [self.label_at.x, self.label_at.y], "label": label, "grips": grips })
@@ -364,6 +378,8 @@ impl BparameterM {
     fn options(&self, i: &Input) -> Option<&'static str> {
         let opts: &[(&str, &str)] = if self.linear {
             &[("Name", "N"), ("Label", "L"), ("Chain", "C"), ("Description", "D"), ("Base", "B"), ("Palette", "P"), ("Value set", "V")]
+        } else if self.visibility {
+            &[("Name", "N"), ("Label", "L"), ("Description", "D"), ("Palette", "P")]
         } else {
             &[("Name", "N"), ("Label", "L"), ("Chain", "C"), ("Description", "D"), ("Palette", "P")]
         };
@@ -384,8 +400,11 @@ impl Interactive for BparameterM {
             PStage::End => Prompt::new("Specify endpoint", Accept::POINT).base(self.start),
             PStage::LinearLabel | PStage::PointLabel => Prompt::new("Specify label location", Accept::POINT),
             PStage::LinearGrips => Prompt::new("Enter number of grips", KW).kw(&["0", "1", "2"]).default("2"),
+            PStage::Location if self.visibility => {
+                Prompt::new("Specify parameter location", Accept::POINT).kw(&["Name", "Label", "Description", "Palette"])
+            }
             PStage::Location => Prompt::new("Specify parameter location", Accept::POINT).kw(&["Name", "Label", "Chain", "Description", "Palette"]),
-            PStage::PointGrips => Prompt::new("Enter number of grips", KW).kw(&["0", "1"]).default("1"),
+            PStage::PointGrips | PStage::VisibilityGrips => Prompt::new("Enter number of grips", KW).kw(&["0", "1"]).default("1"),
             PStage::Label(what) => Prompt::new(format!("Enter {what} property label"), Accept::TEXT),
         }
     }
@@ -399,6 +418,7 @@ impl Interactive for BparameterM {
                 match keyword(t, TYPES) {
                     Some("Linear") => (self.linear, self.stage) = (true, PStage::Start),
                     Some("pOint") => (self.linear, self.stage) = (false, PStage::Location),
+                    Some("Visibility") => (self.visibility, self.stage) = (true, PStage::Location),
                     Some(other) => return Err(EngineError::Other(format!("{other} parameters are not available yet."))),
                     None => s.echo("Invalid option keyword."),
                 }
@@ -406,9 +426,23 @@ impl Interactive for BparameterM {
             PStage::Start | PStage::Location => match (&i, self.options(&i)) {
                 (Input::Point(p), _) => {
                     self.start = *p;
-                    self.stage = if self.linear { PStage::End } else { PStage::PointLabel };
+                    self.stage = if self.linear {
+                        PStage::End
+                    } else if self.visibility {
+                        PStage::VisibilityGrips
+                    } else {
+                        PStage::PointLabel
+                    };
                 }
-                (_, Some("Label")) => self.stage = PStage::Label(if self.linear { "distance" } else { "position" }),
+                (_, Some("Label")) => {
+                    self.stage = PStage::Label(if self.linear {
+                        "distance"
+                    } else if self.visibility {
+                        "visibility"
+                    } else {
+                        "position"
+                    })
+                }
                 (_, Some(other)) => return not_yet(s, other),
                 _ => {}
             },
@@ -428,7 +462,7 @@ impl Interactive for BparameterM {
                     self.stage = if self.stage == PStage::LinearLabel { PStage::LinearGrips } else { PStage::PointGrips };
                 }
             }
-            PStage::LinearGrips | PStage::PointGrips => {
+            PStage::LinearGrips | PStage::PointGrips | PStage::VisibilityGrips => {
                 let most = if self.stage == PStage::LinearGrips { 2 } else { 1 };
                 let grips = match &i {
                     Input::Enter => Some(most),

@@ -5,7 +5,8 @@
 //! circle on its right edge) with one reference.
 
 use cadcraft_doc::dynblock::{
-    ActionKind, ActionSpec, ParamPoint, ParameterKind, ParameterSpec, add_action, add_parameter, dynamic_block, set_property, tag_elements,
+    ActionKind, ActionSpec, MAX_VISIBILITY_STATES, ParamPoint, ParameterKind, ParameterSpec, VisibilityState, add_action, add_parameter,
+    dynamic_block, set_property, set_visibility, tag_elements,
 };
 use cadcraft_doc::{Drawing, EntityKind, Handle};
 use cadcraft_geom::{Vec2, Vec3};
@@ -343,4 +344,74 @@ fn grip_components_name_their_own_parameter() {
         .collect();
     assert_eq!(owners, want);
     assert_eq!((first, second), (1, 5));
+}
+
+/// BOX with a visibility parameter (one grip) over both of its objects.
+fn visible() -> (Drawing, i32) {
+    let mut d = box_drawing();
+    let spec = ParameterSpec::Visibility { at: v(0.0, 6.0), label: None, objects: vec![h("30"), h("31")], grips: 1 };
+    let p = add_parameter(&mut d, "BOX", &spec).unwrap();
+    (d, p)
+}
+
+#[test]
+fn an_authored_visibility_parameter_reads_back_and_links_as_autocad_does() {
+    let (d, p) = visible();
+    let m = dynamic_block(&d, "BOX").unwrap();
+    let param = &m.parameters[0];
+    assert_eq!((p, param.element.as_str(), param.grips.as_slice()), (1, "Visibility State", [2].as_slice()));
+    let ParameterKind::Visibility { at, label, controlled, states, .. } = &param.kind else { panic!("{param:?}") };
+    assert_eq!((*at, label.as_str(), controlled.as_slice()), (v(0.0, 6.0), "Visibility1", [h("30"), h("31")].as_slice()));
+    assert_eq!(states.len(), 1);
+    assert_eq!((states[0].name.as_str(), states[0].visible.as_slice()), ("VisibilityState0", [h("30"), h("31")].as_slice()));
+    assert!(states[0].active.is_empty(), "no other parameters to show");
+    // AutoCAD's own layout: the grip feeds the parameter first, then the parameter its two
+    // location components, every edge of kind 1.
+    let (nodes, edges) = graph(&d);
+    assert_eq!(nodes, vec![(0, 1, vec![0, 0, 1, 2]), (1, 2, vec![-1, -1, 0, 0]), (2, 3, vec![1, 1, -1, -1]), (3, 4, vec![2, 2, -1, -1])]);
+    assert_eq!(edges, vec![(1, 1, 0, vec![-1, -1, -1, -1, -1]), (1, 0, 2, vec![-1, -1, -1, 2, -1]), (1, 0, 3, vec![-1, -1, 1, -1, -1])]);
+    for c in ["BLOCKVISIBILITYPARAMETER", "BLOCKVISIBILITYGRIP"] {
+        assert!(d.foreign.classes.iter().any(|k| k.iter().any(|t| t.code == 1 && t.value == c)), "class {c}");
+    }
+    let mut again = d.clone();
+    let second = ParameterSpec::Visibility { at: v(0.0, 0.0), label: None, objects: Vec::new(), grips: 0 };
+    assert!(add_parameter(&mut again, "BOX", &second).is_err(), "one visibility parameter per block");
+}
+
+#[test]
+fn visibility_states_survive_a_save_and_drive_references() {
+    let (mut d, _) = visible();
+    let states = vec![
+        VisibilityState { name: "Both".into(), visible: vec![h("30"), h("31")], active: Vec::new() },
+        VisibilityState { name: "Circle only".into(), visible: vec![h("31")], active: Vec::new() },
+    ];
+    set_visibility(&mut d, "BOX", &[h("30"), h("31")], &states).unwrap();
+    let again = read_dxf(write_dxf(&d).as_bytes()).unwrap();
+    let m = dynamic_block(&again, "BOX").unwrap();
+    let ParameterKind::Visibility { states: read, .. } = &m.parameters[0].kind else { panic!() };
+    assert_eq!(read, &states);
+
+    set_property(&mut d, h("40"), "Visibility1", "Circle only").unwrap();
+    let EntityKind::Insert(i) = &d.entity(h("40")).unwrap().kind else { panic!() };
+    let b = d.block(&i.block).unwrap();
+    let shown: Vec<bool> = b.entities.iter().map(|e| e.common.visible).collect();
+    assert_eq!(shown, [false, true], "the rectangle hidden, the circle shown");
+}
+
+#[test]
+fn bad_visibility_states_are_refused() {
+    let (mut d, _) = visible();
+    let st = |n: &str| VisibilityState { name: n.into(), visible: Vec::new(), active: Vec::new() };
+    assert!(set_visibility(&mut d, "BOX", &[], &[]).is_err(), "no states");
+    assert!(set_visibility(&mut d, "BOX", &[], &[st("A"), st("a")]).is_err(), "names are case-insensitive");
+    assert!(set_visibility(&mut d, "BOX", &[], &[st(" ")]).is_err(), "a name");
+    assert!(set_visibility(&mut box_drawing(), "BOX", &[], &[st("A")]).is_err(), "no visibility parameter");
+    let many: Vec<VisibilityState> = (0..=MAX_VISIBILITY_STATES).map(|i| st(&i.to_string())).collect();
+    assert!(set_visibility(&mut d, "BOX", &[], &many).is_err());
+    let before = d.foreign.clone();
+    let hostile = ParameterSpec::Visibility { at: v(f64::NAN, 0.0), label: None, objects: Vec::new(), grips: 0 };
+    assert!(add_parameter(&mut d, "BOX", &hostile).is_err());
+    let hostile = ParameterSpec::Visibility { at: v(0.0, 0.0), label: None, objects: Vec::new(), grips: 2 };
+    assert!(add_parameter(&mut box_drawing(), "BOX", &hostile).is_err());
+    assert_eq!(d.foreign, before);
 }
