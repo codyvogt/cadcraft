@@ -128,7 +128,7 @@ impl BlockEdit {
             match m {
                 Mark::Linear { base, end, .. } => (*base, *end) = (*base - off, *end - off),
                 Mark::Point { at, label_at, .. } => (*at, *label_at) = (*at - off, *label_at - off),
-                Mark::Parameter { at, .. } | Mark::Action { at, .. } => *at = *at - off,
+                Mark::List { at, .. } | Mark::Parameter { at, .. } | Mark::Action { at, .. } => *at = *at - off,
             }
         }
         out

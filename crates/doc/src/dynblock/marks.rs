@@ -16,6 +16,9 @@ pub enum Mark {
     Linear { node: i32, base: Vec3, end: Vec3, offset: f64, label: String, base_grip: bool, end_grip: bool },
     /// A point parameter: a marker at `at` and its label at `label_at`.
     Point { node: i32, at: Vec3, label_at: Vec3, label: String, grip: bool },
+    /// A visibility or lookup parameter: a list grip (a triangle pointing down) at `at` when it
+    /// has one, its label beside it.
+    List { node: i32, at: Vec3, label: String, grip: bool },
     /// Another parameter: its name at `at`.
     Parameter { node: i32, at: Vec3, label: String },
     /// An action: a badge with its name at `at`.
@@ -26,7 +29,7 @@ impl Mark {
     /// The graph id of the parameter this marks (`None` for an action).
     pub fn parameter_node(&self) -> Option<i32> {
         match self {
-            Mark::Linear { node, .. } | Mark::Point { node, .. } | Mark::Parameter { node, .. } => Some(*node),
+            Mark::Linear { node, .. } | Mark::Point { node, .. } | Mark::List { node, .. } | Mark::Parameter { node, .. } => Some(*node),
             Mark::Action { .. } => None,
         }
     }
@@ -57,9 +60,8 @@ pub fn marks(d: &Drawing, name: &str) -> Vec<Mark> {
             | ParameterKind::Rotation { base, .. }
             | ParameterKind::Alignment { base, .. }
             | ParameterKind::Flip { base, .. } => Mark::Parameter { node: p.node, at: *base, label },
-            ParameterKind::Visibility { at, .. } | ParameterKind::Lookup { at, .. } | ParameterKind::BasePoint { at } => {
-                Mark::Parameter { node: p.node, at: *at, label }
-            }
+            ParameterKind::Visibility { at, .. } | ParameterKind::Lookup { at, .. } => Mark::List { node: p.node, at: *at, label, grip: grip(0) },
+            ParameterKind::BasePoint { at } => Mark::Parameter { node: p.node, at: *at, label },
             ParameterKind::Other { .. } => continue,
         });
     }

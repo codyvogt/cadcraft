@@ -5,7 +5,7 @@
 //! circle on its right edge) with one reference.
 
 use cadcraft_doc::dynblock::{
-    ActionKind, ActionSpec, MAX_VISIBILITY_STATES, ParamPoint, ParameterKind, ParameterSpec, VisibilityState, add_action, add_parameter,
+    ActionKind, ActionSpec, MAX_VISIBILITY_STATES, Mark, ParamPoint, ParameterKind, ParameterSpec, VisibilityState, add_action, add_parameter,
     dynamic_block, set_property, set_visibility, tag_elements,
 };
 use cadcraft_doc::{Drawing, EntityKind, Handle};
@@ -373,6 +373,9 @@ fn an_authored_visibility_parameter_reads_back_and_links_as_autocad_does() {
     for c in ["BLOCKVISIBILITYPARAMETER", "BLOCKVISIBILITYGRIP"] {
         assert!(d.foreign.classes.iter().any(|k| k.iter().any(|t| t.code == 1 && t.value == c)), "class {c}");
     }
+    // The Block Editor draws it with its list grip.
+    let marks = cadcraft_doc::dynblock::marks(&d, "BOX");
+    assert!(matches!(&marks[..], [Mark::List { node: 1, grip: true, label, .. }] if label == "Visibility1"), "{marks:?}");
     let mut again = d.clone();
     let second = ParameterSpec::Visibility { at: v(0.0, 0.0), label: None, objects: Vec::new(), grips: 0 };
     assert!(add_parameter(&mut again, "BOX", &second).is_err(), "one visibility parameter per block");

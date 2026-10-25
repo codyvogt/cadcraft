@@ -254,6 +254,15 @@ fn paint_marks(app: &CadApp, ctx: &egui::Context, p: &Painter, xf: &Xf) {
                 }
                 p.text(l, Align2::LEFT_BOTTOM, label, font.clone(), accent);
             }
+            Mark::List { at, label, grip, .. } => {
+                // A list grip: a triangle pointing down, the label to its right.
+                let s = to(*at);
+                if *grip {
+                    let pts = vec![s + vec2(-6.0, -5.0), s + vec2(6.0, -5.0), s + vec2(0.0, 6.0)];
+                    p.add(Shape::convex_polygon(pts, grip_dyn, Stroke::new(1.0, fade(t.canvas))));
+                }
+                p.text(s + vec2(8.0, 0.0), Align2::LEFT_CENTER, label, font.clone(), accent);
+            }
             Mark::Parameter { at, label, .. } => {
                 p.text(to(*at), Align2::LEFT_BOTTOM, label, font.clone(), accent);
             }
