@@ -260,3 +260,33 @@ fn selection_highlight_settings_set_save_and_show_in_the_selection_tab() {
         assert!(text.contains(label), "{label} missing from:\n{text}");
     }
 }
+
+/// Visual Effect Settings: each preview and selection effect choice sets its variable.
+#[test]
+fn the_visual_effect_choices_set_their_variables() {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    let mut a = app();
+    a.cmdline("options");
+    a.ui.dialog = Some("options:selection".into());
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_ui_state(
+        |ui, app: &mut CadApp| {
+            app.logic(ui.ctx());
+            app.ui(ui);
+        },
+        a,
+    );
+    h.ctx.data_mut(|d| d.insert_temp(egui::Id::unique("cc_options_visual_effects"), true));
+    h.run_steps(2);
+    for (label, v) in [("Thicken", 1), ("Both", 2), ("Dash", 0)] {
+        h.get_by_label(label).click();
+        h.run_steps(2);
+        assert_eq!(h.state().session.settings.previeweffect, v, "{label}");
+    }
+    for (label, v) in [("Dashed", 0), ("Selection color", 1), ("Dashed", 0)] {
+        h.get_by_label(label).click();
+        h.run_steps(2);
+        assert_eq!(h.state().session.settings.selectioneffect, v, "{label}");
+    }
+}
