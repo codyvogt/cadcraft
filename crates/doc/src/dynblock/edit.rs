@@ -84,12 +84,12 @@ fn set_real(tags: &mut [RawTag], marker: &str, code: i32, v: f64) {
 }
 
 /// Element graph id `node` of `block`: its object's kind and handle, and its grips' handles by
-/// grip id (a linear parameter's base grip first).
+/// position (a linear parameter's base grip first; `None` where it has no grip there).
 struct Element {
     kind: String,
     handle: Handle,
     param: Option<ParameterKind>,
-    grips: Vec<Handle>,
+    grips: Vec<Option<Handle>>,
 }
 
 fn element(d: &Drawing, block: &str, node: i32) -> Result<Element, String> {
@@ -99,7 +99,7 @@ fn element(d: &Drawing, block: &str, node: i32) -> Result<Element, String> {
     let m = dynamic_block(d, block);
     let p = m.as_ref().and_then(|m| m.parameters.iter().find(|p| p.node == node));
     let grips = match (&m, p) {
-        (Some(m), Some(p)) => p.grips.iter().filter_map(|id| m.grip_objects.iter().find(|(g, _)| g == id).map(|(_, h)| *h)).collect(),
+        (Some(m), Some(p)) => p.grips.iter().map(|id| m.grip_objects.iter().find(|(g, _)| g == id).map(|(_, h)| *h)).collect(),
         _ => Vec::new(),
     };
     Ok(Element { kind: o.kind.clone(), handle: o.handle, param: p.map(|p| p.kind.clone()), grips })
@@ -142,9 +142,10 @@ pub fn move_element(d: &mut Drawing, block: &str, node: i32, delta: Vec3) -> Res
                 set_point(&mut o.tags, "AcDbBlock2PtParameter", 1010, b);
                 set_point(&mut o.tags, "AcDbBlock2PtParameter", 1011, n);
             }
-            if let [bg, eg] = e.grips[..] {
-                move_grip(d, bg, b, None);
-                move_grip(d, eg, n, None);
+            for (grip, at) in e.grips.iter().zip([b, n]) {
+                if let Some(g) = grip {
+                    move_grip(d, *g, at, None);
+                }
             }
             Ok(())
         }
@@ -183,9 +184,10 @@ pub fn set_element_point(d: &mut Drawing, block: &str, node: i32, which: Element
             if let Some(o) = object_mut(d, e.handle) {
                 set_point(&mut o.tags, "AcDbBlock2PtParameter", if which == ElementPoint::Base { 1010 } else { 1011 }, to);
             }
-            if let [bg, eg] = e.grips[..] {
-                move_grip(d, bg, b, Some(-dir));
-                move_grip(d, eg, n, Some(dir));
+            for (grip, (at, dir)) in e.grips.iter().zip([(b, -dir), (n, dir)]) {
+                if let Some(g) = grip {
+                    move_grip(d, *g, at, Some(dir));
+                }
             }
             Ok(())
         }
@@ -202,7 +204,7 @@ pub fn set_element_point(d: &mut Drawing, block: &str, node: i32, which: Element
             if let Some(o) = object_mut(d, e.handle) {
                 set_point(&mut o.tags, "AcDbBlock1PtParameter", 1010, to);
             }
-            if let Some(g) = e.grips.first() {
+            if let Some(Some(g)) = e.grips.first() {
                 move_grip(d, *g, to, None);
             }
             Ok(())
@@ -369,5 +371,27 @@ mod tests {
         let g = graph(&d, "B").unwrap();
         assert_eq!(g.edges.len(), 6, "the parameter's components and grips");
         assert!(g.edges.iter().all(|e| e.flags == 4), "{:?}", g.edges);
+    }
+
+    /// A linear parameter with only its end grip: moving it, or its endpoint, takes that grip along.
+    #[test]
+    fn a_lone_end_grip_follows_its_linear_parameter() {
+        let mut d = Drawing::default();
+        let p = add_parameter(&mut d, "B", &ParameterSpec::Linear { base: v(0.0, 0.0), end: v(10.0, 0.0), label: None, label_offset: 0.0, grips: 1 })
+            .unwrap();
+        let grip = |d: &Drawing| {
+            let m = dynamic_block(d, "B").unwrap();
+            let id = m.parameters.iter().find(|x| x.node == p).unwrap().grips.iter().copied().find(|g| *g != 0).unwrap();
+            let h = m.grip_objects.iter().find(|(g, _)| *g == id).unwrap().1;
+            let tags = &d.foreign.objects.iter().find(|o| o.handle == h).unwrap().tags;
+            let dir_x = find(tags, "AcDbBlockLinearGrip", 140).and_then(|i| tags[i].value.trim().parse::<f64>().ok());
+            (point_at(tags, "AcDbBlockGrip", 1010).unwrap(), dir_x)
+        };
+        move_element(&mut d, "B", p, v(5.0, 1.0)).unwrap();
+        assert_eq!(grip(&d).0, v(15.0, 1.0));
+        set_element_point(&mut d, "B", p, ElementPoint::End, v(5.0, 11.0)).unwrap();
+        let (at, dir_x) = grip(&d);
+        assert_eq!(at, v(5.0, 11.0));
+        assert!(dir_x.is_some_and(|x| x.abs() < 1e-9), "the grip points along the new direction (0, 10): {dir_x:?}");
     }
 }

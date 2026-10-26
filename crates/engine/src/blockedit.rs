@@ -517,6 +517,9 @@ impl crate::Session {
     pub fn picked_elements(&self) -> Vec<i32> {
         let Ok(st) = self.state() else { return Vec::new() };
         let Some(be) = &st.block_edit else { return Vec::new() };
+        if be.picked.is_empty() {
+            return Vec::new();
+        }
         let Some(m) = cadcraft_doc::dynblock::dynamic_block(&st.doc, &be.name) else { return Vec::new() };
         be.picked.iter().copied().filter(|n| m.parameters.iter().any(|p| p.node == *n) || m.actions.iter().any(|a| a.node == *n)).collect()
     }
