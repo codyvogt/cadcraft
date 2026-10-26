@@ -225,7 +225,7 @@ fn wholly_inside(d: &Drawing, e: &Entity, tol: f64, pts: &[Vec2]) -> bool {
         .prims
         .iter()
         .filter(|p| matches!(p.kind, cadcraft_render::Kind::Tris))
-        .flat_map(|p| list.points(p).chunks_exact(3).filter_map(|t| if let [a, b, c] = t { Some([*a, *b, *c]) } else { None }))
+        .flat_map(|p| list.points(p).as_chunks::<3>().0.iter().copied())
         .collect();
     !tris.is_empty() && pts.iter().all(|p| tris.iter().any(|t| point_in_polygon(t, *p)))
 }
