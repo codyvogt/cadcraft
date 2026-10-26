@@ -114,57 +114,94 @@ pub fn entity_distance(d: &Drawing, e: &Entity, p: Vec2, tol: f64) -> f64 {
     best
 }
 
-/// Whether `p` is on the text of a dimension or multileader: inside the box around its words,
-/// turned with the text, as plain text is hit anywhere inside its box. Their other geometry is
-/// hit along its lines, so without this the cursor found the object only between the letters'
-/// edges and the lines.
+/// Whether `p` is on the text of a dimension, multileader or block reference: inside the box
+/// around its words, turned with the text, as plain text is hit anywhere inside its box. Their
+/// other geometry is hit along its lines, so without this the cursor found the object only
+/// between the letters' edges and the lines.
 fn in_text(d: &Drawing, e: &Entity, p: Vec2) -> bool {
+    text_outlines(d, e).iter().any(|o| point_in_polygon(o, p))
+}
+
+/// The outlines (closed, in drawing coordinates) of the boxes around the text of a dimension,
+/// multileader or block reference (its attributes and its block's own text), turned with the
+/// text. Points are picked inside them; window, crossing and fence selection test them with the
+/// object's lines.
+fn text_outlines(d: &Drawing, e: &Entity) -> Vec<Vec<Vec2>> {
+    let mtext = |t: &cadcraft_doc::MText| text_box(cadcraft_render::layout_mtext_entity(d, t).strokes.into_iter().flatten(), t.rotation);
+    let plain = |be: &Entity| {
+        let b = entity_bounds(d, be, 0);
+        (!b.is_empty()).then(|| closed(b.corners()))
+    };
     match &e.kind {
         // A dimension with a block (as AutoCAD saves them) is drawn from that block: its text is
         // the text there, not the text the dimension's own geometry would place.
         EntityKind::Dimension(dm) => match dm.block.as_ref().and_then(|n| d.block(n)) {
-            Some(blk) => blk.entities.iter().any(|be| match &be.kind {
-                EntityKind::MText(t) => in_box(cadcraft_render::layout_mtext_entity(d, t).strokes.into_iter().flatten(), t.rotation, p),
-                EntityKind::Text(_) => entity_bounds(d, be, 0).contains(p),
-                _ => false,
-            }),
+            Some(blk) => blk
+                .entities
+                .iter()
+                .filter_map(|be| match &be.kind {
+                    EntityKind::MText(t) => mtext(t),
+                    EntityKind::Text(_) => plain(be),
+                    _ => None,
+                })
+                .collect(),
             None => {
                 let g = cadcraft_render::dimension_in(d, dm);
-                in_box(g.text.iter().flatten().chain(g.text_glyphs.iter().flatten().flatten()).copied(), g.text_angle, p)
+                text_box(g.text.iter().flatten().chain(g.text_glyphs.iter().flatten().flatten()).copied(), g.text_angle).into_iter().collect()
             }
         },
-        EntityKind::MLeader(m) => {
-            m.text.as_ref().is_some_and(|t| in_box(cadcraft_render::layout_mtext_entity(d, t).strokes.into_iter().flatten(), t.rotation, p))
-        }
-        // A block reference's attributes, and the text of its block, inside their boxes.
+        EntityKind::MLeader(m) => m.text.as_ref().and_then(mtext).into_iter().collect(),
         EntityKind::Insert(ins) => {
-            let attrib = ins.attribs.iter().filter(|a| !a.invisible).any(|a| match a.multiline_text() {
-                Some(t) => in_box(cadcraft_render::layout_mtext_entity(d, &t).strokes.into_iter().flatten(), t.rotation, p),
-                None => entity_bounds(d, &Entity::new(e.handle, EntityKind::Text(a.text.clone())), 0).contains(p),
-            });
-            attrib || in_block_text(d, ins, p)
+            let mut out: Vec<Vec<Vec2>> = ins
+                .attribs
+                .iter()
+                .filter(|a| !a.invisible)
+                .filter_map(|a| match a.multiline_text() {
+                    Some(t) => mtext(&t),
+                    None => plain(&Entity::new(e.handle, EntityKind::Text(a.text.clone()))),
+                })
+                .collect();
+            // The shown text of its block (its own objects, not those of nested blocks), placed
+            // as the reference places the block.
+            if let Some(blk) = d.block(&ins.block) {
+                let m = ins.transform(blk.base.xy());
+                out.extend(
+                    blk.entities
+                        .iter()
+                        .filter(|be| be.common.visible)
+                        .filter_map(|be| match &be.kind {
+                            EntityKind::MText(t) => mtext(t),
+                            EntityKind::Text(_) => plain(be),
+                            _ => None,
+                        })
+                        .map(|o| o.into_iter().map(|q| m.apply(q)).collect()),
+                );
+            }
+            out
         }
-        _ => false,
+        _ => Vec::new(),
     }
 }
 
-/// Whether `p` is inside the box of a shown text of block reference `ins`'s block (its own
-/// objects, not those of nested blocks).
-fn in_block_text(d: &Drawing, ins: &cadcraft_doc::Insert, p: Vec2) -> bool {
-    let Some(blk) = d.block(&ins.block) else { return false };
-    let Some(q) = ins.transform(blk.base.xy()).inverse().map(|m| m.apply(p)) else { return false };
-    blk.entities.iter().filter(|be| be.common.visible).any(|be| match &be.kind {
-        EntityKind::MText(t) => in_box(cadcraft_render::layout_mtext_entity(d, t).strokes.into_iter().flatten(), t.rotation, q),
-        EntityKind::Text(_) => entity_bounds(d, be, 0).contains(q),
-        _ => false,
-    })
+/// The closed outline of the box around `pts` turned by `angle` (the box of text set at `angle`).
+fn text_box(pts: impl Iterator<Item = Vec2>, angle: f64) -> Option<Vec<Vec2>> {
+    let b = Bounds2::from_points(pts.filter(|q| q.is_finite()).map(|q| q.rotate(-angle)));
+    (!b.is_empty()).then(|| closed(b.corners()).into_iter().map(|q| q.rotate(angle)).collect())
 }
 
-/// Whether `p` is inside the box around `pts` turned by `angle` (the box of text set at `angle`).
-fn in_box(pts: impl Iterator<Item = Vec2>, angle: f64, p: Vec2) -> bool {
-    let turn = |q: Vec2| q.rotate(-angle);
-    let b = Bounds2::from_points(pts.filter(|q| q.is_finite()).map(turn));
-    !b.is_empty() && b.contains(turn(p))
+fn closed(c: [Vec2; 4]) -> Vec<Vec2> {
+    vec![c[0], c[1], c[2], c[3], c[0]]
+}
+
+/// What window, crossing and fence selection test: the object's hit geometry and, for a
+/// dimension, multileader or block reference, the boxes around its text (so a fence across a
+/// block's text selects it although the block also draws lines elsewhere).
+fn selection_polylines(d: &Drawing, e: &Entity, tol: f64) -> Vec<Vec<Vec2>> {
+    let mut polys = hit_polylines(d, e, tol);
+    if matches!(e.kind, EntityKind::Dimension(_) | EntityKind::Insert(_) | EntityKind::MLeader(_)) {
+        polys.extend(text_outlines(d, e));
+    }
+    polys
 }
 
 fn selectable(d: &Drawing, e: &Entity) -> bool {
@@ -298,7 +335,7 @@ pub(crate) fn in_window(d: &Drawing, e: &Entity, known: Option<Bounds2>, bx: &Bo
     if !crossing || (!infinite && !eb.intersects(bx)) {
         return false;
     }
-    let polys = hit_polylines(d, e, tol);
+    let polys = selection_polylines(d, e, tol);
     let hit = polys.iter().any(|pl| {
         if pl.len() == 1 {
             pl.first().is_some_and(|p| bx.contains(*p))
@@ -340,7 +377,7 @@ pub(crate) fn select_fence_with(d: &Drawing, space: &Space, ix: &Option<std::syn
         if !selectable(d, e) || (!is_infinite(e) && !bounds_of(d, e, known).intersects(&probe)) {
             continue;
         }
-        let polys = hit_polylines(d, e, tol);
+        let polys = selection_polylines(d, e, tol);
         let hit = fence.windows(2).any(|f| {
             let (Some(a), Some(b)) = (f.first(), f.get(1)) else { return false };
             let fl = Line::new(*a, *b);
@@ -375,7 +412,7 @@ pub fn select_polygon(d: &Drawing, space: &Space, poly: &[Vec2], crossing: bool)
         if !infinite && if crossing { !eb.intersects(&pb) } else { !pb.contains_box(&eb) } {
             continue;
         }
-        let polys = hit_polylines(d, e, tol);
+        let polys = selection_polylines(d, e, tol);
         let crosses = polys.iter().any(|pl| {
             pl.windows(2).any(|w| {
                 w.first().zip(w.get(1)).is_some_and(|(p, q)| edges.iter().any(|f| cadcraft_geom::line_line(f, &Line::new(*p, *q)).is_some()))

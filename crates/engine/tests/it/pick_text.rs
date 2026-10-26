@@ -157,3 +157,26 @@ fn bounding_box_edges_pick_nothing() {
     assert_eq!(pick(d, &Space::Model, Vec2::new(121.5, 100.8), 0.01), Some(h), "the block's text");
     assert_eq!(pick(d, &Space::Model, Vec2::new(121.0, 105.8), 0.01), Some(h), "the attribute");
 }
+
+/// A fence, a crossing window and a crossing polygon across a block reference's text select it,
+/// away from the lines its block also draws; the edges of its bounding box still select nothing.
+#[test]
+fn a_fence_or_crossing_across_block_text_selects_the_reference() {
+    use cadcraft_engine::select::{select_fence, select_polygon, select_window};
+    let mut s = Session::new();
+    let l = s.execute("line", &json!({"points": [[0, 0], [10, 10]]})).unwrap()["handles"][0].clone();
+    let t = s.execute("text", &json!({"at": [20, 0], "height": 2, "text": "TAG"})).unwrap()["handle"].clone();
+    s.execute("block", &json!({"name": "Mark", "base": [0, 0], "handles": [l, t]})).unwrap();
+    let r = s.execute("insert", &json!({"name": "Mark", "at": [100, 100]})).unwrap();
+    let h = Handle::parse_hex(r["handle"].as_str().unwrap()).unwrap();
+    let d = s.doc().unwrap();
+    // Down through the text (x 120 to about 125, y 100 to 102), well right of the line.
+    let fence = [Vec2::new(121.5, 110.0), Vec2::new(121.5, 95.0)];
+    assert_eq!(select_fence(d, &Space::Model, &fence), [h]);
+    let bx = Bounds2::new(Vec2::new(121.0, 100.5), Vec2::new(122.0, 101.5));
+    assert_eq!(select_window(d, &Space::Model, bx, true), [h], "a crossing box inside the text");
+    let poly = [Vec2::new(121.0, 95.0), Vec2::new(122.0, 95.0), Vec2::new(122.0, 101.0), Vec2::new(121.0, 101.0)];
+    assert_eq!(select_polygon(d, &Space::Model, &poly, true), [h], "a crossing polygon over the text's edge");
+    // A fence along the empty middle of the reference, crossing neither the line nor the text.
+    assert!(select_fence(d, &Space::Model, &[Vec2::new(112.0, 108.0), Vec2::new(118.0, 108.0)]).is_empty());
+}
