@@ -248,6 +248,11 @@ pub(super) fn target(app: &CadApp, ctx: &egui::Context, xf: &Xf, pos: Option<Pos
     if let Some((n, w, _)) = app.session.element_grips().into_iter().find(|(_, _, at)| xf.to_screen(*at).distance(pos) <= REACH) {
         return Some(Target::Grip(n, w));
     }
+    mark_at(app, ctx, xf, pos).map(Target::Mark)
+}
+
+/// The graph id of the parameter or action whose mark is under `pos` (grips aside).
+fn mark_at(app: &CadApp, ctx: &egui::Context, xf: &Xf, pos: Pos2) -> Option<i32> {
     let to = |v: cadcraft_engine::geom::Vec3| xf.to_screen(v.xy());
     let marks = marks(app, ctx);
     marks
@@ -274,7 +279,17 @@ pub(super) fn target(app: &CadApp, ctx: &egui::Context, xf: &Xf, pos: Option<Pos
             Mark::Parameter { at, label, .. } => label_rect(to(*at), Align2::LEFT_BOTTOM, label).contains(pos),
             Mark::Action { at, name, .. } => label_rect(to(*at), Align2::CENTER_CENTER, name).expand2(vec2(4.0, 2.0)).contains(pos),
         })
-        .map(|m| Target::Mark(mark_node(m)))
+        .map(mark_node)
+}
+
+/// A double-click on a lookup action's mark opens its Property Lookup Table; whether it did.
+/// The first click picked it, so its grip may be under the cursor too: the mark wins.
+pub(super) fn double_click(app: &mut CadApp, ctx: &egui::Context, xf: &Xf, pos: Option<Pos2>) -> bool {
+    let Some(pos) = pos else { return false };
+    if app.session.prompting() || editing(app).is_none() {
+        return false;
+    }
+    mark_at(app, ctx, xf, pos).is_some_and(|n| crate::blookup::open(app, n))
 }
 
 /// A click on `t`: a grip starts moving its point; a parameter or action is picked (Shift+click

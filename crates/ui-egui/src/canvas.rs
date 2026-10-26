@@ -528,6 +528,7 @@ fn paint_pointer_overlay(
     // spin the CPU with the low-latency present mode (`gpu::surface_config`).
 }
 struct DoubleClickContext<'a> {
+    ctx: &'a egui::Context,
     inside: bool,
     double: bool,
     hover: Option<Pos2>,
@@ -538,8 +539,8 @@ struct DoubleClickContext<'a> {
     active_clip: &'a Option<cadcraft_render::clip::PolyClip>,
 }
 
-fn handle_double_click(app: &mut CadApp, ctx: DoubleClickContext<'_>) -> Option<bool> {
-    let DoubleClickContext { inside, double, hover, xf, xf_paper, scale, active_viewport, active_clip } = ctx;
+fn handle_double_click(app: &mut CadApp, context: DoubleClickContext<'_>) -> Option<bool> {
+    let DoubleClickContext { ctx, inside, double, hover, xf, xf_paper, scale, active_viewport, active_clip } = context;
     if inside
         && double
         && !app.session.prompting()
@@ -572,10 +573,12 @@ fn handle_double_click(app: &mut CadApp, ctx: DoubleClickContext<'_>) -> Option<
         return None;
     }
 
-    let mut hatch_dialog = false;
     // Double-click a hatch (no command running) to edit it in the Hatch Edit dialog. The click is
-    // used up: it must not also start a grip edit on the hatch's centre grip below.
-    if inside
+    // used up: it must not also start a grip edit on the hatch's centre grip below. In the Block
+    // Editor, double-clicking a lookup action opens its lookup table, as in AutoCAD.
+    let mut hatch_dialog = inside && double && blockedit::double_click(app, ctx, &xf, hover);
+    if !hatch_dialog
+        && inside
         && double
         && app.session.running.is_none()
         && let Some(hp) = hover
@@ -780,6 +783,7 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
     let Some(hatch_dialog) = handle_double_click(
         app,
         DoubleClickContext {
+            ctx: ui.ctx(),
             inside,
             double: dbl_primary,
             hover: hover_pos,
