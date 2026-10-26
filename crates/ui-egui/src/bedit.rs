@@ -254,7 +254,7 @@ fn save_question(app: &mut CadApp, ctx: &egui::Context, open: &mut bool) {
         .default_pos(ctx.content_rect().center())
         .show(ctx, |ui| {
             ui.set_max_width(420.0);
-            ui.label(format!("{} \"{current}\"?", crate::i18n::t("Save changes to block")));
+            ui.label(crate::tf!("Save changes to block \"{name}\"?", name = current));
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if ui.button(crate::tl!("Yes")).clicked() {
