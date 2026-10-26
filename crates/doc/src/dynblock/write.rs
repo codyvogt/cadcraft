@@ -41,15 +41,26 @@ pub enum ParameterSpec {
     /// Named visibility states (Visibility1) of `objects`, at `at`, with 0 or 1 grip: one state,
     /// `VisibilityState0`, showing them all. A block has one at most.
     Visibility { at: Vec3, label: Option<String>, objects: Vec<Handle>, grips: u8 },
+    /// A value picked from a lookup table (Lookup1), at `at`, with 0 or 1 grip. `name` is its name
+    /// in the Block Editor (default Lookup), `description` the property's, and `show` whether
+    /// references show it in Properties. Its table comes with a lookup action (BACTION).
+    Lookup { at: Vec3, label: Option<String>, name: Option<String>, description: String, show: bool, grips: u8 },
 }
 
-/// What a grip is: a linear parameter's (pointing along `Vec3`), a point's, or a visibility
-/// parameter's (a list to pick from).
+/// What a grip is: a linear parameter's (pointing along `Vec3`), a point's, or a visibility or
+/// lookup parameter's (a list to pick from).
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum GripKind {
     Linear(Vec3),
     Xy,
     Visibility,
+    Lookup,
+}
+
+impl GripKind {
+    fn is_list(self) -> bool {
+        matches!(self, GripKind::Visibility | GripKind::Lookup)
+    }
 }
 
 /// Which point of a two-point parameter an action follows.
@@ -68,6 +79,9 @@ pub enum ActionSpec {
     Stretch { parameter: i32, point: ParamPoint, frame: Vec<Vec2>, selection: Vec<Handle>, vertices: Vec<(Handle, Vec<i32>)>, at: Vec3 },
     /// Moves the selected objects.
     Move { parameter: i32, point: ParamPoint, selection: Vec<Handle>, at: Vec3 },
+    /// The lookup table of lookup parameter `parameter`, empty until it is filled
+    /// ([`set_lookup_table`](super::set_lookup_table)). A lookup parameter has one at most.
+    Lookup { parameter: i32, at: Vec3 },
 }
 
 /// One node of the evaluation graph: its index, flags, graph id, object and the first and last
@@ -81,9 +95,11 @@ pub(super) struct Node {
     pub(super) links: [i32; 4],
 }
 
-/// One edge: its index, flags, kind (1 from a parameter, 2 from a grip), the nodes it joins
+/// One edge: its index, flags, kind (1 from a parameter, 2 from a grip; between a lookup action
+/// and a parameter, how many of the parameter's values the table has), the nodes it joins
 /// (indices) and its neighbours in their lists: previous and next incoming of `to`, previous and
-/// next outgoing of `from`, then one more link AutoCAD leaves at -1.
+/// next outgoing of `from`, then the edge running the other way between the same nodes (a lookup
+/// table's, which reads and sets its parameters), -1 for none.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Edge {
     pub(super) index: i32,
@@ -188,6 +204,33 @@ impl Graph {
         let index = self.nodes.iter().map(|n| n.index).max().map_or(0, |m| m.saturating_add(1));
         self.nodes.push(Node { index, flags: 32, id, handle, links: [-1; 4] });
         index
+    }
+
+    /// Link `edges` again, in order, after the nodes' links were cleared: (from, to, kind, flags,
+    /// pair), `pair` the position in `edges` of the edge running the other way (-1 for none).
+    pub(super) fn relink(&mut self, edges: &[(i32, i32, i32, i32, i32)]) {
+        self.edges.clear();
+        for n in &mut self.nodes {
+            n.links = [-1; 4];
+        }
+        for &(from, to, kind, flags, _) in edges {
+            self.link(from, to, kind);
+            if let Some(e) = self.edges.last_mut() {
+                e.flags = flags;
+            }
+        }
+        // Edge indices are the positions in `edges` now.
+        for (e, &(.., pair)) in self.edges.iter_mut().zip(edges) {
+            e.links[4] = if pair >= 0 && usize::try_from(pair).is_ok_and(|p| p < edges.len()) { pair } else { -1 };
+        }
+    }
+
+    /// The graph's edges as [`relink`](Self::relink) takes them, except those `drop` refuses,
+    /// with node indices mapped by `index` (an edge to a node it maps to `None` is dropped too).
+    pub(super) fn kept_edges(&self, drop: impl Fn(&Edge) -> bool, index: impl Fn(i32) -> Option<i32>) -> Vec<(i32, i32, i32, i32, i32)> {
+        let kept: Vec<(&Edge, i32, i32)> = self.edges.iter().filter(|e| !drop(e)).filter_map(|e| Some((e, index(e.from)?, index(e.to)?))).collect();
+        let position = |old: i32| kept.iter().position(|(e, ..)| e.index == old).and_then(|p| i32::try_from(p).ok()).unwrap_or(-1);
+        kept.iter().map(|(e, from, to)| (*from, *to, e.kind, e.flags, if e.links[4] >= 0 { position(e.links[4]) } else { -1 })).collect()
     }
 
     fn node_mut(&mut self, index: i32) -> Option<&mut Node> {
@@ -348,8 +391,8 @@ impl<'a> Author<'a> {
         let mut tags = element_head(gh, self.graph.handle, gid, name, 0);
         tags.extend([tag(100, "AcDbBlockGrip"), tag(91, xid), tag(92, yid)]);
         point(&mut tags, 1010, at);
-        // A visibility grip is the only one AutoCAD writes 280 0 on.
-        tags.extend([tag(280, i32::from(kind != GripKind::Visibility)), tag(93, -1)]);
+        // A visibility or lookup grip is the only one AutoCAD writes 280 0 on.
+        tags.extend([tag(280, i32::from(!kind.is_list())), tag(93, -1)]);
         let dxf = match kind {
             GripKind::Linear(dir) => {
                 tags.extend([tag(100, "AcDbBlockLinearGrip"), real(140, dir.x), real(141, dir.y), real(142, dir.z)]);
@@ -366,10 +409,15 @@ impl<'a> Author<'a> {
                 self.class("BLOCKVISIBILITYGRIP", "AcDbBlockVisibilityGrip");
                 "BLOCKVISIBILITYGRIP"
             }
+            GripKind::Lookup => {
+                tags.push(tag(100, "AcDbBlockLookUpGrip"));
+                self.class("BLOCKLOOKUPGRIP", "AcDbBlockLookupGrip");
+                "BLOCKLOOKUPGRIP"
+            }
         };
         let grip = self.node(dxf, gh, gid, tags);
-        // AutoCAD links a visibility grip to its parameter before the location components.
-        if kind == GripKind::Visibility {
+        // AutoCAD links a list grip to its parameter before the location components.
+        if kind.is_list() {
             self.graph.link(grip, param, 1);
         }
         self.class("BLOCKGRIPLOCATIONCOMPONENT", "AcDbBlockGripExpr");
@@ -382,7 +430,7 @@ impl<'a> Author<'a> {
             let c = self.node("BLOCKGRIPLOCATIONCOMPONENT", h, id, tags);
             self.graph.link(param, c, 1);
         }
-        if kind != GripKind::Visibility {
+        if !kind.is_list() {
             self.graph.link(grip, param, 2);
         }
         gid
@@ -390,14 +438,19 @@ impl<'a> Author<'a> {
 
     /// An element name not used in the block yet: `base`, else `base` and the lowest free number.
     fn element_name(&self, base: &str) -> String {
-        let used: Vec<String> = dynamic_block(self.d, &self.record)
-            .map(|m| m.parameters.iter().map(|p| p.element.clone()).chain(m.actions.iter().map(|a| a.name.clone())).collect())
-            .unwrap_or_default();
-        let free = |n: &str| !used.iter().any(|u| u.eq_ignore_ascii_case(n));
-        if free(base) {
-            return base.to_string();
-        }
-        (1..).map(|i| format!("{base}{i}")).find(|n| free(n)).unwrap_or_else(|| base.to_string())
+        if self.name_free(base) { base.to_string() } else { self.numbered_name(base) }
+    }
+
+    /// `base` and the lowest number from 1 not used as an element name in the block yet
+    /// (AutoCAD numbers lookup actions from Lookup1).
+    fn numbered_name(&self, base: &str) -> String {
+        (1..).map(|i| format!("{base}{i}")).find(|n| self.name_free(n)).unwrap_or_else(|| format!("{base}1"))
+    }
+
+    /// No parameter or action of the block has element name `name` (any case).
+    fn name_free(&self, name: &str) -> bool {
+        dynamic_block(self.d, &self.record)
+            .is_none_or(|m| !m.parameters.iter().map(|p| &p.element).chain(m.actions.iter().map(|a| &a.name)).any(|u| u.eq_ignore_ascii_case(name)))
     }
 }
 
@@ -558,6 +611,36 @@ pub fn add_parameter(d: &mut Drawing, name: &str, spec: &ParameterSpec) -> Resul
             a.finish();
             Ok(id)
         }
+        ParameterSpec::Lookup { at, label, name: element, description, show, grips } => {
+            if !finite(*at) {
+                return Err("Invalid point.".into());
+            }
+            if *grips > 1 {
+                return Err("A lookup parameter has 0 or 1 grip.".into());
+            }
+            let record = name.trim().to_ascii_uppercase();
+            let label = label.clone().unwrap_or_else(|| free_label(d, &record, "Lookup"));
+            let mut a = Author::open(d, name)?;
+            let element = match element.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+                Some(e) if !a.name_free(e) => return Err(format!("A parameter or action is already named \"{e}\".")),
+                Some(e) => e.to_string(),
+                None => a.element_name("Lookup"),
+            };
+            let (h, id) = (a.d.new_handle(), a.graph.next_id());
+            let param = a.graph.add_node(id, h);
+            let first_grip = a.new.len();
+            let grip = if *grips == 1 { a.grip(param, *at, "Grip", ["UpdatedX", "UpdatedY"], 0.0, GripKind::Lookup) } else { 0 };
+            let mut tags = element_head(h, a.graph.handle, id, &element, if *grips == 1 { 0 } else { 1 });
+            tags.extend([tag(100, "AcDbBlockParameter"), tag(280, i32::from(*show)), tag(281, 0), tag(100, "AcDbBlock1PtParameter")]);
+            point(&mut tags, 1010, *at);
+            tags.extend([tag(93, grip), tag(170, 0), tag(171, 0)]);
+            // 94: its lookup action's graph id, none yet.
+            tags.extend([tag(100, "AcDbBlockLookUpParameter"), tag(303, &label), tag(304, description.trim()), tag(94, 0)]);
+            a.new.insert(first_grip, ForeignObject { handle: h, kind: "BLOCKLOOKUPPARAMETER".into(), tags });
+            a.class("BLOCKLOOKUPPARAMETER", "AcDbBlockLookupParameter");
+            a.finish();
+            Ok(id)
+        }
     }
 }
 
@@ -580,15 +663,17 @@ fn visibility_tags(label: &str, description: &str, controlled: &[Handle], states
     out
 }
 
-/// The objects of block `m`'s parameters other than its visibility parameter, and their grips
-/// (all of them, or parameter `only`'s): what a visibility state lists as active in it.
+/// The objects of block `m`'s parameters other than its visibility parameter, their grips and
+/// the block's actions (all of them, or parameter or action `only`'s): what a visibility state
+/// lists as active in it.
 pub fn parameter_objects(m: &super::DynamicBlock, only: Option<i32>) -> Vec<Handle> {
     let grip = |id: &i32| m.grip_objects.iter().find(|(g, _)| g == id).map(|(_, h)| *h);
-    m.parameters
+    let params = m
+        .parameters
         .iter()
         .filter(|p| !matches!(p.kind, ParameterKind::Visibility { .. }) && only.is_none_or(|n| n == p.node))
-        .flat_map(|p| std::iter::once(p.handle).chain(p.grips.iter().filter(|g| **g != 0).filter_map(grip)))
-        .collect()
+        .flat_map(|p| std::iter::once(p.handle).chain(p.grips.iter().filter(|g| **g != 0).filter_map(grip)));
+    params.chain(m.actions.iter().filter(|a| only.is_none_or(|n| n == a.node)).map(|a| a.handle)).collect()
 }
 
 /// Keep block `name`'s visibility parameter in step with `objects`, the block's objects: as
@@ -675,6 +760,7 @@ pub fn add_action(d: &mut Drawing, name: &str, spec: &ActionSpec) -> Result<i32,
         ActionSpec::Stretch { parameter, point, selection, at, .. } | ActionSpec::Move { parameter, point, selection, at } => {
             (*parameter, *point, selection, *at)
         }
+        ActionSpec::Lookup { parameter, at } => return add_lookup_action(d, name, *parameter, *at),
     };
     if !finite(at) {
         return Err("Invalid point.".into());
@@ -698,7 +784,8 @@ pub fn add_action(d: &mut Drawing, name: &str, spec: &ActionSpec) -> Result<i32,
     let (h, id) = (a.d.new_handle(), a.graph.next_id());
     let (kind, cpp, element) = match spec {
         ActionSpec::Stretch { .. } => ("BLOCKSTRETCHACTION", "AcDbBlockStretchAction", a.element_name("Stretch")),
-        ActionSpec::Move { .. } => ("BLOCKMOVEACTION", "AcDbBlockMoveAction", a.element_name("Move")),
+        // (A lookup action returned above.)
+        ActionSpec::Move { .. } | ActionSpec::Lookup { .. } => ("BLOCKMOVEACTION", "AcDbBlockMoveAction", a.element_name("Move")),
     };
     let mut tags = element_head(h, a.graph.handle, id, &element, 0);
     tags.extend([tag(100, "AcDbBlockAction"), tag(70, 0), tag(71, selection.len())]);
@@ -729,6 +816,40 @@ pub fn add_action(d: &mut Drawing, name: &str, spec: &ActionSpec) -> Result<i32,
     a.graph.link(pindex, node, 1);
     a.class(kind, cpp);
     a.finish();
+    Ok(id)
+}
+
+/// Add an empty lookup table to lookup parameter `parameter` of block `name`; its graph id. As in
+/// AutoCAD, it reads nothing yet and gives the parameter's value (one lookup column), and the
+/// parameter names it (`94`).
+fn add_lookup_action(d: &mut Drawing, name: &str, parameter: i32, at: Vec3) -> Result<i32, String> {
+    if !finite(at) {
+        return Err("Invalid point.".into());
+    }
+    let m = dynamic_block(d, name).ok_or("The block has no parameters; add one first (BPARAMETER).")?;
+    let p = m.parameters.iter().find(|p| p.node == parameter).ok_or_else(|| format!("No parameter {parameter} in the block."))?;
+    if !matches!(p.kind, ParameterKind::Lookup { .. }) {
+        return Err(format!("A {} can't have a lookup action.", p.element));
+    }
+    if super::lookup::table_of(&m, parameter).is_some() {
+        return Err("Lookup parameter already associated with a lookup table.".into());
+    }
+    let param_handle = p.handle;
+    let mut a = Author::open(d, name)?;
+    let pindex = a.graph.index_of(parameter).ok_or_else(|| format!("No parameter {parameter} in the block."))?;
+    let (h, id) = (a.d.new_handle(), a.graph.next_id());
+    let element = a.numbered_name("Lookup");
+    let column = super::TableColumn { node: parameter, property: "lookupString".into(), lookup: true, unmatched: "Custom".into(), reverse: false };
+    // 1071 is 8 on a table with no inputs yet, 0 once it has some.
+    let mut tags = element_head(h, a.graph.handle, id, &element, 8);
+    tags.extend([tag(100, "AcDbBlockAction"), tag(70, 0), tag(71, 0)]);
+    point(&mut tags, 1010, at);
+    tags.extend(super::lookup::table_tags(&[column], &[]));
+    let node = a.node("BLOCKLOOKUPACTION", h, id, tags);
+    a.graph.link(node, pindex, 1);
+    a.class("BLOCKLOOKUPACTION", "AcDbBlockLookupAction");
+    a.finish();
+    super::lookup::set_action_of(d, param_handle, id);
     Ok(id)
 }
 

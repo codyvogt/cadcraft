@@ -222,12 +222,28 @@ pub fn set_element_point(d: &mut Drawing, block: &str, node: i32, which: Element
 /// parameter takes its grips, their location components and its actions along. Returns the
 /// graph ids erased (the parameters' and actions'; grips and components aren't listed).
 pub fn erase_elements(d: &mut Drawing, block: &str, nodes: &[i32]) -> Result<Vec<i32>, String> {
+    // Lookup tables lose the columns of parameters erased; a lookup parameter's own table goes.
+    let params: Vec<i32> =
+        dynamic_block(d, block).map(|m| m.parameters.iter().map(|p| p.node).filter(|n| nodes.contains(n)).collect()).unwrap_or_default();
+    let tables = super::lookup::drop_columns(d, block, &params)?;
+    let nodes: Vec<i32> = nodes.iter().copied().chain(tables.into_iter().filter(|t| !nodes.contains(t))).collect();
+    // A lookup parameter whose table goes (and that stays) names no table any more.
+    if let Some(m) = dynamic_block(d, block) {
+        for a in m.actions.iter().filter(|a| nodes.contains(&a.node)) {
+            let super::ActionKind::Lookup { columns, .. } = &a.kind else { continue };
+            for c in columns.iter().filter(|c| c.lookup && !nodes.contains(&c.node)) {
+                if let Some(p) = m.parameters.iter().find(|p| p.node == c.node) {
+                    super::lookup::set_action_of(d, p.handle, 0);
+                }
+            }
+        }
+    }
     let mut g = graph(d, block)?;
     let kind_of = |h: Handle| d.foreign.objects.iter().find(|o| o.handle == h).map(|o| o.kind.clone()).unwrap_or_default();
     let index_of = |g: &Graph, id: i32| g.nodes.iter().find(|n| n.id == id).map(|n| n.index);
     let mut gone: Vec<i32> = Vec::new(); // node indices
     let mut erased: Vec<i32> = Vec::new(); // graph ids
-    for id in nodes {
+    for id in &nodes {
         let Some(i) = index_of(&g, *id) else { return Err(format!("No parameter or action {id} in the block.")) };
         let kind = g.nodes.iter().find(|n| n.index == i).map(|n| kind_of(n.handle)).unwrap_or_default();
         if kind.contains("GRIP") {
@@ -256,7 +272,8 @@ pub fn erase_elements(d: &mut Drawing, block: &str, nodes: &[i32]) -> Result<Vec
             };
             let Some(n) = g.nodes.iter().find(|n| n.index == other) else { continue };
             let k = kind_of(n.handle);
-            let follows = outgoing && (k == "BLOCKGRIPLOCATIONCOMPONENT" || is_action(&k));
+            // A lookup table reading the parameter lost its column above.
+            let follows = outgoing && (k == "BLOCKGRIPLOCATIONCOMPONENT" || (is_action(&k) && k != "BLOCKLOOKUPACTION"));
             let grip = !outgoing && k.contains("GRIP") && k != "BLOCKGRIPLOCATIONCOMPONENT";
             if follows || grip {
                 take(other, &mut gone);
@@ -272,20 +289,13 @@ pub fn erase_elements(d: &mut Drawing, block: &str, nodes: &[i32]) -> Result<Vec
     let kept: Vec<_> = g.nodes.iter().filter(|n| !gone.contains(&n.index)).cloned().collect();
     let renumber: Vec<(i32, i32)> = kept.iter().zip(0..).map(|(n, i)| (n.index, i)).collect();
     let new_index = |old: i32| renumber.iter().find(|(o, _)| *o == old).map(|(_, n)| *n);
-    let edges: Vec<(i32, i32, i32, i32)> = g.edges.iter().filter_map(|e| Some((new_index(e.from)?, new_index(e.to)?, e.kind, e.flags))).collect();
+    // An edge keeps its flags (a graph read from a file may have set some) and its pair.
+    let edges = g.kept_edges(|_| false, new_index);
     g.nodes = kept;
     for (n, i) in g.nodes.iter_mut().zip(0..) {
         n.index = i;
-        n.links = [-1; 4];
     }
-    g.edges.clear();
-    for (from, to, kind, flags) in edges {
-        g.link(from, to, kind);
-        // An edge keeps its flags (a graph read from a file may have set some).
-        if let Some(e) = g.edges.last_mut() {
-            e.flags = flags;
-        }
-    }
+    g.relink(&edges);
     let erased_handles: Vec<Handle> = handles.clone();
     let f = std::sync::Arc::make_mut(&mut d.foreign);
     let tags = g.tags();

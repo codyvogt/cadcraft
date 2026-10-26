@@ -194,7 +194,7 @@ fn types_not_available_yet_say_so() {
     let mut s = Session::new();
     boxed(&mut s);
     s.execute("bedit", &json!({ "name": "Box" })).unwrap();
-    for t in ["polar", "xy", "rotation", "flip", "lookup", "base", "alignment"] {
+    for t in ["polar", "xy", "rotation", "flip", "base", "alignment"] {
         let e = s.execute("bparameter", &json!({ "type": t, "start": [0, 0], "end": [1, 0] })).unwrap_err().to_string();
         assert!(e.contains("not available yet"), "{t}: {e}");
     }

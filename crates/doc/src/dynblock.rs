@@ -24,6 +24,7 @@ mod apply;
 mod copy;
 mod edit;
 mod grips;
+mod lookup;
 mod marks;
 mod reference;
 mod write;
@@ -31,6 +32,7 @@ pub use apply::{drag_grip, set_property};
 pub use copy::{copy_definition, remap_handles, restore_definition};
 pub use edit::{ElementPoint, element_points, erase_elements, move_element, set_element_point};
 pub use grips::{DynGrip, GripPart, GripShape, grips};
+pub use lookup::{MAX_LOOKUP_ROWS, TableColumn, column_property, input_properties, set_lookup_table};
 pub use marks::{Mark, marks};
 pub use reference::{CustomProperty, Reference, Value, custom_properties, reference};
 pub use write::{
@@ -247,6 +249,9 @@ pub struct LookupColumn {
     pub lookup: bool,
     /// What the reference shows when no row matches ("Custom").
     pub unmatched: String,
+    /// A lookup column whose value can be set on a reference, setting the row's inputs
+    /// ("Allow reverse lookup"); otherwise it is read only.
+    pub reverse: bool,
 }
 
 /// The groups of an object split at its subclass markers (100): `(marker, groups after it)`.
@@ -527,8 +532,8 @@ fn stretch(tags: &[RawTag]) -> (Vec<(i32, String)>, ActionKind) {
 }
 
 /// A lookup table: rows (92) and columns (93), the cells row by row (302, after a 301 header),
-/// then each column: unmatched name (303 then 305), parameter id (94), lookup flag (282) and the
-/// parameter value it stands for (304).
+/// then each column: parameter id (94, after an empty 303), lookup flag (282), unmatched name
+/// (305), reverse lookup (281) and the parameter value it stands for (304).
 fn lookup(tags: &[RawTag]) -> ActionKind {
     let mut c = Cursor::new(tags);
     let rows = c.count(92);
@@ -543,8 +548,9 @@ fn lookup(tags: &[RawTag]) -> ActionKind {
             let node = c.int(94);
             let lookup = c.int(282) != 0;
             let unmatched = c.string(305);
+            let reverse = c.int(281) != 0;
             let property = c.string(304);
-            LookupColumn { node, property, lookup, unmatched }
+            LookupColumn { node, property, lookup, unmatched, reverse }
         })
         .collect();
     ActionKind::Lookup { columns, rows }

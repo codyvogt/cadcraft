@@ -1,12 +1,15 @@
 //! BPARAMETER and BACTION: authoring a dynamic block in the Block Editor. A parameter is a
-//! property references to the block can change (a distance, a position); an action is what
-//! changing it does to the block's objects (stretch them, move them). Both are written into the
+//! property references to the block can change (a distance, a position, a value from a lookup
+//! table); an action is what changing it does to the block's objects (stretch them, move them) or,
+//! for a lookup parameter, its lookup table (filled with BLOOKUPTABLE). Both are written into the
 //! block's dynamic data ([`cadcraft_doc::dynblock::add_parameter`], [`add_action`]) as AutoCAD
 //! writes its own, so the block works as a dynamic block here and in AutoCAD. Only while the
 //! Block Editor is open on a block; points are in the editor's coordinates (the block's base point
 //! at the origin).
 
-use cadcraft_doc::dynblock::{ActionSpec, Mark, ParamPoint, ParameterSpec, add_action, add_parameter, marks};
+use cadcraft_doc::dynblock::{
+    ActionKind, ActionSpec, Mark, ParamPoint, ParameterKind, ParameterSpec, add_action, add_parameter, dynamic_block, marks,
+};
 use cadcraft_doc::{Drawing, EntityKind, Handle};
 use cadcraft_geom::{Vec2, Vec3};
 use serde_json::{Value, json};
@@ -21,14 +24,14 @@ pub(super) fn specs() -> Vec<CommandSpec> {
         CommandSpec::new("bparameter", "Parameter", run_bparameter)
             .alias(&["-bparameter"])
             .params(
-                "{type: \"linear\"|\"point\"|\"visibility\", linear: start: [x,y], end: [x,y], labelAt?: [x,y] (where the label goes; default on the line); point: at: [x,y], labelAt?: [x,y]; visibility: at: [x,y] (one state, VisibilityState0, showing every object; one per block); label?: property name (default Distance1/Position1/Visibility1…), grips?: 0|1|2 (linear, default 2) or 0|1 (point, visibility, default 1)} → {node, element, label} (editor coordinates)",
+                "{type: \"linear\"|\"point\"|\"visibility\"|\"lookup\", linear: start: [x,y], end: [x,y], labelAt?: [x,y] (where the label goes; default on the line); point: at: [x,y], labelAt?: [x,y]; visibility: at: [x,y] (one state, VisibilityState0, showing every object; one per block); lookup: at: [x,y], name?: its name in the editor (default Lookup), description?: text, palette?: bool (shown in Properties; default true); label?: property name (default Distance1/Position1/Visibility1/Lookup1…), grips?: 0|1|2 (linear, default 2) or 0|1 (point, visibility, lookup, default 1)} → {node, element, label} (editor coordinates)",
             )
             .enabled(authoring)
             .interactive(|_| Ok(Box::new(BparameterM::default()))),
         CommandSpec::new("baction", "Action", run_baction)
             .alias(&["-baction"])
             .params(
-                "{parameter: graph id or property name (\"Distance1\"), type: \"stretch\"|\"move\", point?: \"start\"|\"second\" (which end of a linear parameter it follows, default second), handles: [objects], frame?: [[x,y],[x,y]] (stretch: corners) | polygon?: [[x,y]…] (stretch: a crossing polygon), at?: [x,y] (where the action shows; default the parameter's point)} → {node, name} (editor coordinates)",
+                "{parameter: graph id or property name (\"Distance1\"), type: \"stretch\"|\"move\"|\"lookup\" (a lookup parameter's, and the default for one: its empty lookup table, one per parameter; fill it with BLOOKUPTABLE), point?: \"start\"|\"second\" (which end of a linear parameter it follows, default second), handles: [objects], frame?: [[x,y],[x,y]] (stretch: corners) | polygon?: [[x,y]…] (stretch: a crossing polygon), at?: [x,y] (where the action shows; default the parameter's point)} → {node, name} (editor coordinates)",
             )
             .enabled(authoring)
             .interactive(|_| Ok(Box::new(BactionM::default()))),
@@ -99,10 +102,25 @@ fn run_bparameter(s: &mut Session, p: &Value) -> Result<Value> {
             let objects = s.doc()?.model.iter().map(|e| e.handle).collect();
             ParameterSpec::Visibility { at: to_block(at, base), label, objects, grips: grips_param("bparameter", p, 1, 1)? }
         }
-        Some(other) if ["alignment", "base", "polar", "xy", "rotation", "flip", "lookup"].contains(&other) => {
+        Some("lookup") => {
+            let at = point_param(p, "at").ok_or_else(|| bad("bparameter", "`at` ([x, y]) is required"))?;
+            let show = match p.get("palette") {
+                None | Some(Value::Null) => true,
+                Some(v) => v.as_bool().ok_or_else(|| bad("bparameter", "`palette` is true or false"))?,
+            };
+            ParameterSpec::Lookup {
+                at: to_block(at, base),
+                label,
+                name: str_param(p, "name").map(str::trim).filter(|n| !n.is_empty()).map(str::to_string),
+                description: str_param(p, "description").unwrap_or_default().to_string(),
+                show,
+                grips: grips_param("bparameter", p, 1, 1)?,
+            }
+        }
+        Some(other) if ["alignment", "base", "polar", "xy", "rotation", "flip"].contains(&other) => {
             return Err(bad("bparameter", format!("{other} parameters are not available yet")));
         }
-        _ => return Err(bad("bparameter", "`type` is \"linear\", \"point\" or \"visibility\"")),
+        _ => return Err(bad("bparameter", "`type` is \"linear\", \"point\", \"visibility\" or \"lookup\"")),
     };
     let visibility = matches!(spec, ParameterSpec::Visibility { .. });
     let node = add_parameter(s.doc_mut()?, &block, &spec).map_err(|e| bad("bparameter", e))?;
@@ -118,28 +136,51 @@ fn run_bparameter(s: &mut Session, p: &Value) -> Result<Value> {
 /// A parameter of the edited block as BACTION follows it, in editor coordinates.
 #[derive(Clone, Debug, PartialEq)]
 enum Followed {
-    Linear { node: i32, base: Vec2, end: Vec2 },
-    Point { node: i32, at: Vec2 },
+    Linear {
+        node: i32,
+        base: Vec2,
+        end: Vec2,
+    },
+    Point {
+        node: i32,
+        at: Vec2,
+    },
+    /// A lookup parameter (its action is its lookup table).
+    Lookup {
+        node: i32,
+        at: Vec2,
+    },
 }
 
 impl Followed {
     fn node(&self) -> i32 {
         match self {
-            Followed::Linear { node, .. } | Followed::Point { node, .. } => *node,
+            Followed::Linear { node, .. } | Followed::Point { node, .. } | Followed::Lookup { node, .. } => *node,
         }
     }
 }
 
 /// The parameters of `block` an action can follow, in editor coordinates.
 fn followable(d: &Drawing, block: &str, base: Vec2) -> Vec<Followed> {
+    let lookups: Vec<i32> = dynamic_block(d, block)
+        .map(|m| m.parameters.iter().filter(|p| matches!(p.kind, ParameterKind::Lookup { .. })).map(|p| p.node).collect())
+        .unwrap_or_default();
     marks(d, block)
         .into_iter()
         .filter_map(|m| match m {
             Mark::Linear { node, base: b, end, .. } => Some(Followed::Linear { node, base: b.xy() - base, end: end.xy() - base }),
             Mark::Point { node, at, .. } => Some(Followed::Point { node, at: at.xy() - base }),
+            Mark::List { node, at, .. } if lookups.contains(&node) => Some(Followed::Lookup { node, at: at.xy() - base }),
             _ => None,
         })
         .collect()
+}
+
+/// Whether lookup parameter `node` of `block` has its lookup table already (one per parameter).
+fn has_table(d: &Drawing, block: &str, node: i32) -> bool {
+    dynamic_block(d, block).is_some_and(|m| {
+        m.actions.iter().any(|a| matches!(&a.kind, ActionKind::Lookup { columns, .. } if columns.iter().any(|c| c.lookup && c.node == node)))
+    })
 }
 
 /// The parameter named by `v`: its graph id, or its property name ("Distance1").
@@ -160,9 +201,7 @@ fn parameter_named(d: &Drawing, block: &str, base: Vec2, v: &Value) -> Result<Fo
     let node = node.ok_or_else(|| bad("baction", format!("no parameter {v} in the block")))?;
     match list.into_iter().find(|f| f.node() == node) {
         Some(f) => Ok(f),
-        None if m.is_some_and(|m| m.parameters.iter().any(|p| p.node == node)) => {
-            Err(bad("baction", "that parameter can't have stretch or move actions yet"))
-        }
+        None if m.is_some_and(|m| m.parameters.iter().any(|p| p.node == node)) => Err(bad("baction", "that parameter can't have actions yet")),
         None => Err(bad("baction", format!("no parameter {v} in the block"))),
     }
 }
@@ -242,9 +281,15 @@ fn add(
                 *end
             }
         }
-        Followed::Point { at, .. } => *at,
+        Followed::Point { at, .. } | Followed::Lookup { at, .. } => *at,
     };
     let at = to_block(at.unwrap_or(shown), base);
+    match (param, kind) {
+        (Followed::Lookup { .. }, "lookup") => {}
+        (Followed::Lookup { .. }, _) => return Err(bad("baction", "a lookup parameter's action is its lookup table (`type`: \"lookup\")")),
+        (_, "lookup") => return Err(bad("baction", "a lookup action needs a lookup parameter")),
+        _ => {}
+    }
     let spec = match kind {
         "stretch" => {
             let frame = frame.ok_or_else(|| bad("baction", "a stretch needs `frame` (two corners) or `polygon`"))?;
@@ -259,12 +304,15 @@ fn add(
             ActionSpec::Stretch { parameter: param.node(), point, frame, selection, vertices, at }
         }
         "move" => ActionSpec::Move { parameter: param.node(), point, selection: handles.to_vec(), at },
-        "array" | "scale" | "rotate" | "flip" | "polarstretch" | "lookup" => {
+        "lookup" => ActionSpec::Lookup { parameter: param.node(), at },
+        "array" | "scale" | "rotate" | "flip" | "polarstretch" => {
             return Err(bad("baction", format!("{kind} actions are not available yet")));
         }
-        _ => return Err(bad("baction", "`type` is \"stretch\" or \"move\"")),
+        _ => return Err(bad("baction", "`type` is \"stretch\", \"move\" or \"lookup\"")),
     };
     let node = add_action(s.doc_mut()?, &block, &spec).map_err(|e| bad("baction", e))?;
+    // Active in the visibility state the editor shows, as a parameter added there is.
+    super::bvstate::parameter_added(s, node)?;
     let name = cadcraft_doc::dynblock::dynamic_block(s.doc()?, &block).and_then(|m| m.actions.into_iter().find(|a| a.node == node)).map(|a| a.name);
     Ok(json!({ "node": node, "name": name }))
 }
@@ -273,7 +321,15 @@ fn run_baction(s: &mut Session, p: &Value) -> Result<Value> {
     let (block, base) = editing(s)?;
     let which = p.get("parameter").ok_or_else(|| bad("baction", "`parameter` (graph id or property name) is required"))?;
     let param = parameter_named(s.doc()?, &block, base, which)?;
-    let kind = str_param(p, "type").map(|t| t.trim().to_ascii_lowercase().replace(' ', "")).ok_or_else(|| bad("baction", "`type` is required"))?;
+    let kind = match (str_param(p, "type"), &param) {
+        (Some(t), _) => t.trim().to_ascii_lowercase().replace(' ', ""),
+        // A lookup parameter has one kind of action, and it acts on no objects.
+        (None, Followed::Lookup { .. }) => "lookup".to_string(),
+        (None, _) => return Err(bad("baction", "`type` is required")),
+    };
+    if kind == "lookup" {
+        return add(s, &param, &kind, ParamPoint::End, &[], None, point_param(p, "at"));
+    }
     let point = match str_param(p, "point").map(str::to_ascii_lowercase).as_deref() {
         None | Some("second") | Some("end") => ParamPoint::End,
         Some("start") | Some("base") => ParamPoint::Base,
@@ -314,6 +370,29 @@ fn text_of(i: &Input) -> Option<&str> {
     }
 }
 
+/// The name a new parameter gets by default: `prefix` alone when free (element names only, as
+/// for the element "Lookup"), else `prefix` and the lowest free number; property labels
+/// (`labels`) always take a number (Lookup1).
+fn next_name(s: &Session, prefix: &str, labels: bool) -> String {
+    let used: Vec<String> = s
+        .state()
+        .ok()
+        .and_then(|st| dynamic_block(&st.doc, &st.block_edit.as_ref()?.name))
+        .map(|m| {
+            if labels {
+                m.parameters.iter().filter_map(|p| p.kind.label().map(str::to_string)).collect()
+            } else {
+                m.parameters.iter().map(|p| p.element.clone()).chain(m.actions.iter().map(|a| a.name.clone())).collect()
+            }
+        })
+        .unwrap_or_default();
+    let free = |n: &str| !used.iter().any(|u| u.eq_ignore_ascii_case(n));
+    if !labels && free(prefix) {
+        return prefix.to_string();
+    }
+    (1..).map(|i| format!("{prefix}{i}")).find(|n| free(n)).unwrap_or_else(|| format!("{prefix}1"))
+}
+
 /// Options AutoCAD offers that are not available yet: answered with a message.
 fn not_yet(s: &mut Session, what: &str) -> Result<Step> {
     s.echo(format!("{what} is not available yet."));
@@ -334,6 +413,10 @@ enum PStage {
     VisibilityGrips,
     /// Typing the property name, then back to the stage it was asked at.
     Label(&'static str),
+    /// A lookup parameter's name in the editor, its description, and whether Properties shows it.
+    Name,
+    Description,
+    Palette,
 }
 
 /// BPARAMETER's prompts, as AutoCAD asks them on the command line.
@@ -342,6 +425,11 @@ struct BparameterM {
     stage: PStage,
     linear: bool,
     visibility: bool,
+    lookup: bool,
+    /// A lookup parameter's name, description and "not in Properties" (Palette No).
+    name: Option<String>,
+    description: String,
+    hidden: bool,
     start: Vec2,
     end: Vec2,
     label_at: Vec2,
@@ -364,7 +452,9 @@ const TYPES: &[(&str, &str)] = &[
 impl BparameterM {
     fn make(&self, s: &mut Session, grips: u8) -> Result<Step> {
         let label = self.label.clone();
-        let p = if self.visibility {
+        let p = if self.lookup {
+            json!({ "type": "lookup", "at": [self.start.x, self.start.y], "label": label, "name": self.name, "description": self.description, "palette": !self.hidden, "grips": grips })
+        } else if self.visibility {
             json!({ "type": "visibility", "at": [self.start.x, self.start.y], "label": label, "grips": grips })
         } else if self.linear {
             json!({ "type": "linear", "start": [self.start.x, self.start.y], "end": [self.end.x, self.end.y], "labelAt": [self.label_at.x, self.label_at.y], "label": label, "grips": grips })
@@ -378,7 +468,7 @@ impl BparameterM {
     fn options(&self, i: &Input) -> Option<&'static str> {
         let opts: &[(&str, &str)] = if self.linear {
             &[("Name", "N"), ("Label", "L"), ("Chain", "C"), ("Description", "D"), ("Base", "B"), ("Palette", "P"), ("Value set", "V")]
-        } else if self.visibility {
+        } else if self.visibility || self.lookup {
             &[("Name", "N"), ("Label", "L"), ("Description", "D"), ("Palette", "P")]
         } else {
             &[("Name", "N"), ("Label", "L"), ("Chain", "C"), ("Description", "D"), ("Palette", "P")]
@@ -391,7 +481,7 @@ impl Interactive for BparameterM {
     fn name(&self) -> &'static str {
         "BPARAMETER"
     }
-    fn prompt(&self, _s: &Session) -> Prompt {
+    fn prompt(&self, s: &Session) -> Prompt {
         match self.stage {
             PStage::Type => Prompt::new("Enter parameter type", KW).kw(&TYPES.iter().map(|(k, _)| *k).collect::<Vec<_>>()),
             PStage::Start => Prompt::new("Specify start point", Accept::POINT)
@@ -400,12 +490,22 @@ impl Interactive for BparameterM {
             PStage::End => Prompt::new("Specify endpoint", Accept::POINT).base(self.start),
             PStage::LinearLabel | PStage::PointLabel => Prompt::new("Specify label location", Accept::POINT),
             PStage::LinearGrips => Prompt::new("Enter number of grips", KW).kw(&["0", "1", "2"]).default("2"),
-            PStage::Location if self.visibility => {
+            PStage::Location if self.visibility || self.lookup => {
                 Prompt::new("Specify parameter location", Accept::POINT).kw(&["Name", "Label", "Description", "Palette"])
             }
             PStage::Location => Prompt::new("Specify parameter location", Accept::POINT).kw(&["Name", "Label", "Chain", "Description", "Palette"]),
             PStage::PointGrips | PStage::VisibilityGrips => Prompt::new("Enter number of grips", KW).kw(&["0", "1"]).default("1"),
+            PStage::Label("lookup") => {
+                Prompt::new("Enter lookup property label", Accept::TEXT).default(self.label.clone().unwrap_or_else(|| next_name(s, "Lookup", true)))
+            }
             PStage::Label(what) => Prompt::new(format!("Enter {what} property label"), Accept::TEXT),
+            PStage::Name => {
+                Prompt::new("Enter parameter name", Accept::TEXT).default(self.name.clone().unwrap_or_else(|| next_name(s, "Lookup", false)))
+            }
+            PStage::Description => Prompt::new("Enter property description", Accept::TEXT),
+            PStage::Palette => {
+                Prompt::new("Display property in Properties palette", KW).kw(&["Yes", "No"]).default(if self.hidden { "No" } else { "Yes" })
+            }
         }
     }
     fn input(&mut self, s: &mut Session, i: Input) -> Result<Step> {
@@ -419,6 +519,7 @@ impl Interactive for BparameterM {
                     Some("Linear") => (self.linear, self.stage) = (true, PStage::Start),
                     Some("pOint") => (self.linear, self.stage) = (false, PStage::Location),
                     Some("Visibility") => (self.visibility, self.stage) = (true, PStage::Location),
+                    Some("looKup") => (self.lookup, self.stage) = (true, PStage::Location),
                     Some(other) => return Err(EngineError::Other(format!("{other} parameters are not available yet."))),
                     None => s.echo("Invalid option keyword."),
                 }
@@ -428,7 +529,7 @@ impl Interactive for BparameterM {
                     self.start = *p;
                     self.stage = if self.linear {
                         PStage::End
-                    } else if self.visibility {
+                    } else if self.visibility || self.lookup {
                         PStage::VisibilityGrips
                     } else {
                         PStage::PointLabel
@@ -437,12 +538,17 @@ impl Interactive for BparameterM {
                 (_, Some("Label")) => {
                     self.stage = PStage::Label(if self.linear {
                         "distance"
+                    } else if self.lookup {
+                        "lookup"
                     } else if self.visibility {
                         "visibility"
                     } else {
                         "position"
                     })
                 }
+                (_, Some("Name")) if self.lookup => self.stage = PStage::Name,
+                (_, Some("Description")) if self.lookup => self.stage = PStage::Description,
+                (_, Some("Palette")) if self.lookup => self.stage = PStage::Palette,
                 (_, Some(other)) => return not_yet(s, other),
                 _ => {}
             },
@@ -479,6 +585,30 @@ impl Interactive for BparameterM {
                     _ => {}
                 }
                 self.stage = if self.linear { PStage::Start } else { PStage::Location };
+            }
+            PStage::Name => {
+                match &i {
+                    Input::Text(t) | Input::Keyword(t) if !t.trim().is_empty() => self.name = Some(t.trim().to_string()),
+                    _ => {}
+                }
+                self.stage = PStage::Location;
+            }
+            PStage::Description => {
+                if let Some(t) = text_of(&i) {
+                    self.description = t.trim().to_string();
+                }
+                self.stage = PStage::Location;
+            }
+            PStage::Palette => {
+                match (&i, text_of(&i).and_then(|t| keyword(t, &[("Yes", "Y"), ("No", "N")]))) {
+                    (Input::Enter, _) => {}
+                    (_, Some(k)) => self.hidden = k == "No",
+                    _ => {
+                        s.echo("Invalid option keyword.");
+                        return Ok(Step::Continue);
+                    }
+                }
+                self.stage = PStage::Location;
             }
         }
         Ok(Step::Continue)
@@ -559,6 +689,7 @@ impl Interactive for BactionM {
                     .base_opt(self.frame.last().copied())
             }
             AStage::Objects => self.select.prompt(),
+            AStage::Location if self.kind == "lookup" => Prompt::new("Specify action location", Accept::POINT),
             AStage::Location => Prompt::new("Specify action location", Accept::POINT).kw(&["Multiplier", "Offset"]),
         }
     }
@@ -574,7 +705,7 @@ impl Interactive for BactionM {
                         let reach = (s.pixel_size() * s.settings.pickbox.max(1.0) * 3.0).max(1e-9);
                         let near = |f: &Followed| match f {
                             Followed::Linear { base, end, .. } => segment_distance(*base, *end, *p),
-                            Followed::Point { at, .. } => (*at - *p).len(),
+                            Followed::Point { at, .. } | Followed::Lookup { at, .. } => (*at - *p).len(),
                         };
                         let list = followable(s.doc()?, &block, base);
                         list.into_iter().map(|f| (near(&f), f)).filter(|(d, _)| *d <= reach).min_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, f)| f)
@@ -584,11 +715,20 @@ impl Interactive for BactionM {
                     _ => return Ok(Step::Continue),
                 };
                 match found {
+                    // A lookup parameter's action is its table, asked for no type or objects.
+                    Some(Followed::Lookup { node, .. }) if has_table(s.doc()?, &block, node) => {
+                        s.echo("Lookup parameter already associated with a lookup table.");
+                    }
+                    Some(f @ Followed::Lookup { .. }) => {
+                        self.param = Some(f);
+                        self.kind = "lookup";
+                        self.stage = AStage::Location;
+                    }
                     Some(f) => {
                         self.param = Some(f);
                         self.stage = AStage::Type;
                     }
-                    None => s.echo("No linear or point parameter there."),
+                    None => s.echo("No linear, point or lookup parameter there."),
                 }
             }
             AStage::Type => {
