@@ -180,3 +180,33 @@ fn a_fence_or_crossing_across_block_text_selects_the_reference() {
     // A fence along the empty middle of the reference, crossing neither the line nor the text.
     assert!(select_fence(d, &Space::Model, &[Vec2::new(112.0, 108.0), Vec2::new(118.0, 108.0)]).is_empty());
 }
+
+/// A crossing box or polygon wholly inside a block reference's text, or inside a SOLID its block
+/// fills, selects the reference, as it would select the text or the SOLID; one in the reference's
+/// empty space, which its bounding box also covers, selects nothing.
+#[test]
+fn a_crossing_inside_block_text_or_fill_selects_the_reference_and_empty_space_does_not() {
+    use cadcraft_engine::doc::{Common, Solid};
+    use cadcraft_engine::geom::Vec3;
+    use cadcraft_engine::select::{select_polygon, select_window};
+    let mut s = Session::new();
+    let l = s.execute("line", &json!({"points": [[0, 0], [10, 10]]})).unwrap()["handles"][0].clone();
+    let t = s.execute("text", &json!({"at": [20, 0], "height": 2, "text": "TAG"})).unwrap()["handle"].clone();
+    // A filled triangle at x 30 to 40.
+    let v = |x: f64, y: f64| Vec3::new(x, y, 0.0);
+    let solid = s
+        .doc_mut()
+        .unwrap()
+        .add(&Space::Model, Common::default(), EntityKind::Solid(Solid { corners: [v(30.0, 0.0), v(40.0, 0.0), v(30.0, 10.0), v(30.0, 10.0)] }))
+        .unwrap();
+    s.execute("block", &json!({"name": "Mark", "base": [0, 0], "handles": [l, t, solid.hex()]})).unwrap();
+    let r = s.execute("insert", &json!({"name": "Mark", "at": [100, 100]})).unwrap();
+    let h = Handle::parse_hex(r["handle"].as_str().unwrap()).unwrap();
+    let d = s.doc().unwrap();
+    let crossing = |x0: f64, y0: f64, x1: f64, y1: f64| select_window(d, &Space::Model, Bounds2::new(Vec2::new(x0, y0), Vec2::new(x1, y1)), true);
+    assert!(crossing(112.0, 106.0, 114.0, 108.0).is_empty(), "empty space between the line and the text");
+    assert_eq!(crossing(131.0, 101.0, 133.0, 103.0), [h], "inside the filled triangle");
+    assert!(crossing(137.0, 107.0, 139.0, 109.0).is_empty(), "beside the triangle's slope, outside its fill");
+    let poly = [Vec2::new(121.0, 100.5), Vec2::new(122.0, 100.5), Vec2::new(122.0, 101.5), Vec2::new(121.0, 101.5)];
+    assert_eq!(select_polygon(d, &Space::Model, &poly, true), [h], "a crossing polygon inside the text");
+}

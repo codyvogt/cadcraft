@@ -204,6 +204,32 @@ fn selection_polylines(d: &Drawing, e: &Entity, tol: f64) -> Vec<Vec<Vec2>> {
     polys
 }
 
+/// Whether the points `pts` (a crossing box's corners or a crossing polygon) lie wholly inside
+/// the text of a dimension, multileader or block reference (one box around its text), or inside
+/// what a block reference fills (its SOLIDs, TRACEs and solid hatches), as a crossing inside
+/// plain text or a SOLID selects it. Their empty space, which their bounding box also covers,
+/// selects nothing.
+fn wholly_inside(d: &Drawing, e: &Entity, tol: f64, pts: &[Vec2]) -> bool {
+    if !matches!(e.kind, EntityKind::Dimension(_) | EntityKind::Insert(_) | EntityKind::MLeader(_)) || pts.is_empty() {
+        return false;
+    }
+    if text_outlines(d, e).iter().any(|o| pts.iter().all(|p| point_in_polygon(o, *p))) {
+        return true;
+    }
+    if !matches!(e.kind, EntityKind::Insert(_)) {
+        return false;
+    }
+    let list =
+        cadcraft_render::build_entities(d, std::iter::once(e), &cadcraft_render::Options { tolerance: tol, text: false, ..Default::default() });
+    let tris: Vec<[Vec2; 3]> = list
+        .prims
+        .iter()
+        .filter(|p| matches!(p.kind, cadcraft_render::Kind::Tris))
+        .flat_map(|p| list.points(p).chunks_exact(3).filter_map(|t| if let [a, b, c] = t { Some([*a, *b, *c]) } else { None }))
+        .collect();
+    !tris.is_empty() && pts.iter().all(|p| tris.iter().any(|t| point_in_polygon(t, *p)))
+}
+
 fn selectable(d: &Drawing, e: &Entity) -> bool {
     d.is_visible(e)
 }
@@ -343,8 +369,9 @@ pub(crate) fn in_window(d: &Drawing, e: &Entity, known: Option<Bounds2>, bx: &Bo
             pl.windows(2).any(|w| w.first().zip(w.get(1)).is_some_and(|(a, b)| seg_hits_box(*a, *b, bx)))
         }
     });
-    // A crossing box entirely inside a text/block bounding rectangle also selects it.
-    if hit || (eb.contains_box(bx) && matches!(e.kind, EntityKind::Text(_) | EntityKind::MText(_) | EntityKind::Insert(_))) {
+    // A crossing box entirely inside plain text, or inside the text or fills of a dimension,
+    // multileader or block reference, also selects it.
+    if hit || (eb.contains_box(bx) && (matches!(e.kind, EntityKind::Text(_) | EntityKind::MText(_)) || wholly_inside(d, e, tol, &bx.corners()))) {
         return true;
     }
     // SOLID/TRACE are filled polygons. A crossing window wholly within the
@@ -420,7 +447,7 @@ pub fn select_polygon(d: &Drawing, space: &Space, poly: &[Vec2], crossing: bool)
         });
         let mut pts = polys.iter().flatten();
         let hit = if crossing {
-            crosses || pts.any(|p| point_in_polygon(poly, *p))
+            crosses || pts.any(|p| point_in_polygon(poly, *p)) || (eb.contains_box(&pb) && wholly_inside(d, e, tol, poly))
         } else {
             !crosses && !polys.is_empty() && pts.all(|p| point_in_polygon(poly, *p))
         };
