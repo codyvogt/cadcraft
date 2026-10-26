@@ -160,7 +160,7 @@ fn open_closed(s: &mut Session, name: &str, create: bool) -> Result<Value> {
     let dynamic =
         |be: &crate::blockedit::BlockEdit| crate::blockedit::has_dynamic_data(&be.host.doc, if be.current { "*Model_Space" } else { &be.name });
     if s.state().is_ok_and(|st| st.block_edit.as_ref().is_some_and(dynamic)) {
-        s.echo("This is a dynamic block: BPARAMETER and BACTION add linear, point and visibility parameters with stretch and move actions, BVSTATE, BVHIDE and BVSHOW edit visibility states; its other parameters and actions are kept as they are.");
+        s.echo("This is a dynamic block: BPARAMETER and BACTION add linear, point, visibility and lookup parameters with stretch, move and lookup actions, BVSTATE, BVHIDE and BVSHOW edit visibility states, BLOOKUPTABLE fills lookup tables; its other parameters and actions are kept as they are.");
     }
     Ok(json!({ "block": name, "new": new }))
 }

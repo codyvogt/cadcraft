@@ -266,3 +266,36 @@ fn hostile_lookup_params_never_panic() {
     s.script("BPARAMETER K N\n\nP\nmaybe\n").unwrap();
     s.input(Input::Cancel).unwrap();
 }
+
+#[test]
+fn a_lookup_on_a_position_follows_its_point() {
+    let mut s = Session::new();
+    let i = boxed(&mut s);
+    authored(&mut s);
+    s.execute("blookuptable", &json!({ "inputs": ["Position1 X"], "rows": [[10, "Big"], [6, "Small"]], "reverse": true })).unwrap();
+    s.execute("bclose", &json!({})).unwrap();
+    assert!(custom(&s, &i).contains(&("Size".to_string(), "Big".to_string(), true)));
+    let m = dynamic_block(s.doc().unwrap(), "Box").unwrap();
+    let size = m.parameters.iter().find(|p| matches!(p.kind, ParameterKind::Lookup { .. })).unwrap().node;
+    // The lookup value the reference keeps (written to its data, as AutoCAD writes it).
+    let kept = |s: &Session| match cadcraft_engine::doc::dynblock::reference(s.doc().unwrap(), h(&i)).unwrap().values.get(&size) {
+        Some(cadcraft_engine::doc::dynblock::Value::Text { value }) => value.clone(),
+        v => format!("{v:?}"),
+    };
+    // Typed in Properties.
+    s.execute("blocks.reference.set", &json!({ "handle": i, "name": "Position1 X", "value": "6" })).unwrap();
+    assert!(custom(&s, &i).contains(&("Size".to_string(), "Small".to_string(), true)), "{:?}", custom(&s, &i));
+    assert_eq!(kept(&s), "Small");
+    // Dragged by its grip (the reference is at (100,0), so the block's x = 10 is at 110).
+    let node = m.parameters.iter().find(|p| matches!(p.kind, ParameterKind::Point { .. })).unwrap().node;
+    cadcraft_engine::doc::dynblock::drag_grip(
+        s.doc_mut().unwrap(),
+        h(&i),
+        node,
+        cadcraft_engine::doc::dynblock::GripPart::At,
+        cadcraft_engine::geom::Vec2::new(110.0, 2.5),
+    )
+    .unwrap();
+    assert!(custom(&s, &i).contains(&("Size".to_string(), "Big".to_string(), true)), "{:?}", custom(&s, &i));
+    assert_eq!(kept(&s), "Big");
+}

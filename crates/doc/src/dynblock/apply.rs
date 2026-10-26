@@ -318,6 +318,7 @@ pub fn set_property(d: &mut Drawing, insert: Handle, name: &str, value: &str) ->
             let v = number(value)?;
             let at = if is_x { Vec3::new(block_base.x + v / sx, at.y, at.z) } else { Vec3::new(at.x, block_base.y + v / sy, at.z) };
             plan.set.insert(p.node, Val::Point(at));
+            plan.chain(&m, &r.values, p.node, if is_x { "UpdatedX" } else { "UpdatedY" })?;
         }
         _ => return Err(format!("CADCraft can't change {name} yet.")),
     }
@@ -372,6 +373,8 @@ pub fn drag_grip(d: &mut Drawing, insert: Handle, node: i32, part: super::GripPa
         (ParameterKind::Point { label, .. }, GripPart::At) => {
             let Some(Val::Point(at)) = current(&m, &r.values, node) else { return Err(format!("{label} has no position.")) };
             plan.set.insert(node, Val::Point(Vec3::new(q.x, q.y, at.z)));
+            plan.chain(&m, &r.values, node, "UpdatedX")?;
+            plan.chain(&m, &r.values, node, "UpdatedY")?;
         }
         _ => return Err("That grip can't be dragged.".into()),
     }
