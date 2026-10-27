@@ -62,7 +62,7 @@ impl SelectThen {
         // Immediate operations once selection is done.
         match self.op {
             Op::Erase => {
-                let n = erase(s, &self.objs)?;
+                let n = erase(s, &self.objs, true)?;
                 let _ = n;
                 Ok(Step::Done)
             }
@@ -295,7 +295,8 @@ impl Interactive for SelectThen {
         self.sel = SelectPhase::begin(s);
         // Parameters or actions picked in the Block Editor are a selection for MOVE and ERASE.
         if !self.sel.done && matches!(self.op, Op::Move | Op::Erase) && !s.picked_elements().is_empty() {
-            self.sel.picked = s.selection();
+            // Selected objects come along only where PICKFIRST lets a selection count.
+            self.sel.picked = if s.settings.pickfirst { s.selection() } else { Vec::new() };
             self.sel.done = true;
         }
         if self.sel.done {

@@ -194,3 +194,37 @@ fn bvmode_is_set_without_a_drawing() {
     assert!(s.settings.bvmode);
     cadcraft_engine::sysvars::set(&mut s, "OSMODE", &json!(3)).unwrap();
 }
+
+/// A JSON MOVE or ERASE given `handles` acts on those objects only; picked parameters and
+/// actions come along only when the command uses the selection.
+#[test]
+fn json_handles_leave_picked_elements_alone() {
+    let (mut s, rect) = authored();
+    s.execute("blocks.element.select", &json!({ "nodes": [9] })).unwrap();
+    s.execute("erase", &json!({ "handles": [] })).unwrap();
+    assert_eq!(names(&s), ["Linear", "Point", "Stretch"], "an empty list erases nothing");
+    s.execute("move", &json!({ "handles": [rect.hex()], "delta": [1, 0] })).unwrap();
+    let m = dynamic_block(s.doc().unwrap(), "Box").unwrap();
+    let ParameterKind::Point { at, .. } = &m.parameters[1].kind else { panic!() };
+    assert_eq!(*at, Vec3::new(2.0, 2.0, 0.0), "the picked point parameter stayed");
+    s.execute("move", &json!({ "delta": [1, 0] })).unwrap();
+    let m = dynamic_block(s.doc().unwrap(), "Box").unwrap();
+    let ParameterKind::Point { at, .. } = &m.parameters[1].kind else { panic!() };
+    assert_eq!(*at, Vec3::new(3.0, 2.0, 0.0), "with the selection, it moves");
+}
+
+/// With PICKFIRST off a selection made before MOVE doesn't count; picked parameters still do.
+#[test]
+fn pickfirst_off_moves_picked_elements_without_the_selection() {
+    let (mut s, rect) = authored();
+    s.settings.pickfirst = false;
+    s.execute("select", &json!({ "handles": [rect.hex()] })).unwrap();
+    s.execute("blocks.element.select", &json!({ "nodes": [9] })).unwrap();
+    s.script("MOVE\n0,0\n1,0\n").unwrap();
+    assert!(s.running.is_none());
+    let EntityKind::LwPolyline(pl) = &s.doc().unwrap().entity(rect).unwrap().kind else { panic!() };
+    assert_eq!(pl.vertices[0].p, Vec2::new(0.0, 0.0), "the selected rectangle stayed");
+    let m = dynamic_block(s.doc().unwrap(), "Box").unwrap();
+    let ParameterKind::Point { at, .. } = &m.parameters[1].kind else { panic!() };
+    assert_eq!(*at, Vec3::new(3.0, 2.0, 0.0));
+}

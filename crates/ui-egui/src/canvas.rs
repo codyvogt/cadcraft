@@ -830,7 +830,7 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
         app.canvas.hover_cycle = None;
         app.canvas.cycle_key = Some(key);
     }
-    let cycled = pressed_primary && !middle_down && cycle_click(app, &xf, hover_pos, raw_world.filter(|_| inside), mods.shift);
+    let cycled = pressed_primary && !middle_down && cycle_click(app, ui.ctx(), &xf, hover_pos, raw_world.filter(|_| inside), mods.shift);
     // Clicks.
     if inside
         && pressed_primary
