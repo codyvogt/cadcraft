@@ -192,6 +192,10 @@ impl BlockEdit {
         b.base.x = self.base.x;
         b.base.y = self.base.y;
         let mut entities = entities;
+        // Saved under another name, a dynamic block's copy has its own graph and objects.
+        if !name.eq_ignore_ascii_case(&self.name) {
+            cadcraft_doc::dynblock::copy_definition(&mut d, &self.name, name, &mut entities);
+        }
         // A dynamic block's objects carry element tags, which its references' copies are paired
         // with; objects added in the editor get theirs here.
         cadcraft_doc::dynblock::tag_elements(&mut d, name, &mut entities);

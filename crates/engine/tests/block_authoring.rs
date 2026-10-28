@@ -73,6 +73,40 @@ fn a_linear_stretch_authored_in_json_drives_references() {
     assert_eq!(corners(&s, &i), [(5.0, 5.0), (20.0, 5.0), (20.0, 10.0), (5.0, 10.0)]);
 }
 
+/// Saved under another name (BSAVEAS), a dynamic block keeps its parameters and actions in a graph
+/// of its own, with objects of its own: references to the copy change as the original's do, and
+/// the original is as it was.
+#[test]
+fn bsaveas_gives_a_dynamic_block_its_own_graph() {
+    let mut s = Session::new();
+    let (r, c, i) = boxed(&mut s);
+    s.execute("bedit", &json!({ "name": "Box" })).unwrap();
+    s.execute("bparameter", &json!({ "type": "linear", "start": [0, 0], "end": [10, 0], "labelAt": [5, -2] })).unwrap();
+    s.execute("baction", &json!({ "parameter": "Distance1", "type": "stretch", "frame": [[8, -1], [12, 6]], "handles": [r, c], "at": [12, -2] }))
+        .unwrap();
+    s.execute("bsaveas", &json!({ "name": "Box2" })).unwrap();
+    s.execute("bclose", &json!({})).unwrap();
+    let d = s.doc().unwrap();
+    let (a, b) = (dynamic_block(d, "Box").unwrap(), dynamic_block(d, "Box2").expect("the copy has dynamic data"));
+    assert_eq!((b.parameters.len(), b.actions.len()), (a.parameters.len(), a.actions.len()));
+    assert_ne!(a.parameters[0].handle, b.parameters[0].handle, "its own graph objects");
+    assert_ne!(a.actions[0].handle, b.actions[0].handle);
+    // The copy's action acts on the copy's objects, not the original's.
+    let (own, copy) = (d.block("Box").unwrap(), d.block("Box2").unwrap());
+    let handles = |blk: &cadcraft_engine::doc::Block| blk.entities.iter().map(|e| e.handle).collect::<Vec<_>>();
+    assert!(handles(own).iter().all(|h| !handles(copy).contains(h)), "no handle in two blocks");
+    assert_eq!(b.actions[0].selection.len(), 2);
+    assert!(b.actions[0].selection.iter().all(|h| handles(copy).contains(h)), "{:?} in {:?}", b.actions[0].selection, handles(copy));
+    assert_eq!(a.actions[0].selection, [h(&r), h(&c)], "the original's action is unchanged");
+
+    // A reference to the copy stretches; the original's reference does too.
+    let j = s.execute("insert", &json!({ "name": "Box2", "at": [200, 0] })).unwrap()["handle"].clone();
+    s.execute("blocks.reference.set", &json!({ "handle": j, "name": "Distance1", "value": "15" })).unwrap();
+    assert_eq!(corners(&s, &j), [(5.0, 5.0), (20.0, 5.0), (20.0, 10.0), (5.0, 10.0)]);
+    s.execute("blocks.reference.set", &json!({ "handle": i, "name": "Distance1", "value": "12" })).unwrap();
+    assert_eq!(corners(&s, &i), [(5.0, 5.0), (17.0, 5.0), (17.0, 10.0), (5.0, 10.0)]);
+}
+
 #[test]
 fn bparameter_and_baction_ask_as_autocad_does() {
     let mut s = Session::new();

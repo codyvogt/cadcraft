@@ -374,7 +374,7 @@ impl<'a> Author<'a> {
 
 /// The handle the kept data uses for block `record`'s BLOCK_RECORD (a new one, registered,
 /// when none refers to it yet).
-fn record_handle(d: &mut Drawing, record: &str) -> Handle {
+pub(super) fn record_handle(d: &mut Drawing, record: &str) -> Handle {
     if let Some(h) = d.foreign.targets.iter().find(|(_, (k, n))| k == "BLOCK_RECORD" && n == record).map(|(h, _)| *h) {
         return h;
     }
@@ -384,7 +384,7 @@ fn record_handle(d: &mut Drawing, record: &str) -> Handle {
 }
 
 /// A GUID for block `name`'s dynamic data, made from its name and graph (stable for a drawing).
-fn guid(name: &str, graph: Handle) -> String {
+pub(super) fn guid(name: &str, graph: Handle) -> String {
     // FNV-1a over the name and handle, spread over 128 bits.
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let mut word = || {
@@ -610,7 +610,7 @@ fn strip_app(xd: &mut Vec<RawTag>, app: &str) {
 }
 
 /// The object entry `key` of dictionary `dict` names.
-fn dict_entry(d: &Drawing, dict: Handle, key: &str) -> Option<Handle> {
+pub(super) fn dict_entry(d: &Drawing, dict: Handle, key: &str) -> Option<Handle> {
     let o = d.foreign.objects.iter().find(|o| o.handle == dict)?;
     let mut tags = o.tags.iter();
     while let Some(t) = tags.next() {
