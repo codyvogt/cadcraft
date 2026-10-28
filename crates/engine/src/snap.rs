@@ -441,6 +441,7 @@ pub(crate) fn nearest_with_direction(d: &Drawing, space: &Space, cursor: Vec2, a
     best.map(|(_, at, dir)| (at, dir))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn gather_in(
     d: &Drawing,
     space: &Space,
