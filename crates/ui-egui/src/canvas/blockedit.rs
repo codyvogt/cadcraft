@@ -151,7 +151,7 @@ pub(super) fn paint(app: &mut CadApp, ctx: &egui::Context, p: &egui::Painter, xf
                         {
                             toggle_mode = true;
                         }
-                        egui::ComboBox::from_id_salt("cadcraft-block-editor-state").selected_text(v.current.as_str()).show_ui(ui, |ui| {
+                        craft_ui::ComboBox::from_id_salt("cadcraft-block-editor-state").selected_text(v.current.as_str()).show_ui(ui, |ui| {
                             for n in &v.names {
                                 if ui.selectable_label(*n == v.current, n.as_str()).clicked() && *n != v.current {
                                     pick = Some(n.clone());
