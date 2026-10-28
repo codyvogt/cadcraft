@@ -538,6 +538,134 @@ fn in_frame(frame: &[Vec2], p: Vec2) -> bool {
     }
 }
 
+/// What the actions of one change read (the dynamic block, the parameters' values and the change)
+/// and what they write: the values they carry along (`new`, starting from the change) and what
+/// happens to each copied object (`moves`).
+struct ActionRun<'a> {
+    m: &'a DynamicBlock,
+    values: &'a BTreeMap<i32, Value>,
+    set: &'a BTreeMap<i32, Val>,
+    param_of: HashMap<Handle, i32>,
+    /// The reference's copy of each of the dynamic block's objects.
+    copy_map: &'a HashMap<Handle, Handle>,
+    new: BTreeMap<i32, Val>,
+    moves: HashMap<Handle, Vec<Op>>,
+}
+
+impl ActionRun<'_> {
+    fn copy_of(&self, dh: &Handle) -> Option<Handle> {
+        self.copy_map.get(dh).copied()
+    }
+
+    /// The value of parameter `node` so far: carried along by an action already, else the
+    /// reference's.
+    fn value_of(&self, node: i32) -> Option<Val> {
+        self.new.get(&node).cloned().or_else(|| current(self.m, self.values, node))
+    }
+
+    /// Action `a`, when one of its connections follows a parameter the change sets.
+    fn action(&mut self, a: &super::Action) {
+        if !a.connections.iter().any(|(n, _)| self.set.contains_key(n)) {
+            return;
+        }
+        match turn_or_mirror(self.m, self.values, self.set, a) {
+            Some(t) => self.turn_or_mirror(a, t),
+            None => self.stretch(a),
+        }
+    }
+
+    /// A rotate or flip action turns or mirrors its objects, and carries the parameters in its
+    /// selection the same way. A handle the selection repeats is handled once (twice would turn it
+    /// twice, or mirror it back).
+    fn turn_or_mirror(&mut self, a: &super::Action, t: Mat3) {
+        let mut handled: HashSet<Handle> = HashSet::new();
+        for h in &a.selection {
+            if !handled.insert(*h) {
+                continue;
+            }
+            if let Some(node) = self.param_of.get(h).copied() {
+                if self.set.contains_key(&node) {
+                    continue;
+                }
+                let Some(cur) = self.value_of(node) else { continue };
+                let p = |q: Vec3| t.apply(q.xy()).to3(q.z);
+                let moved = match cur {
+                    Val::Point(q) => Val::Point(p(q)),
+                    Val::Points(b, e) => Val::Points(p(b), p(e)),
+                    Val::Flip(b, e, f) => Val::Flip(p(b), p(e), f),
+                    other => other,
+                };
+                self.new.insert(node, moved);
+            } else if let Some(c) = self.copy_of(h) {
+                self.moves.entry(c).or_default().push(Op::Transform(t));
+            }
+        }
+    }
+
+    /// A stretch or move action moves its objects (the vertices of a stretch's frame) by the change
+    /// of its two connections, and carries the parameters in its selection.
+    fn stretch(&mut self, a: &super::Action) {
+        let (mult, angle, frame, vertices): (f64, f64, &[Vec2], &[(Handle, Vec<i32>)]) = match &a.kind {
+            ActionKind::Stretch { frame, vertices, multiplier, angle_offset } => (*multiplier, *angle_offset, frame, vertices),
+            ActionKind::Move { multiplier, angle_offset } => (*multiplier, *angle_offset, &[], &[]),
+            _ => return,
+        };
+        // The two connections give the change in x and y.
+        let comp = |i: usize| {
+            a.connections.get(i).map_or(0.0, |(n, conn)| match (self.set.get(n), current(self.m, self.values, *n)) {
+                (Some(nv), Some(ov)) => delta(&ov, nv, conn),
+                _ => 0.0,
+            })
+        };
+        let mult = if mult == 0.0 { 1.0 } else { mult };
+        let v = Vec2::new(comp(0), comp(1)).rotate(angle) * mult;
+        if !(v.x.is_finite() && v.y.is_finite()) || (v.x == 0.0 && v.y == 0.0) {
+            return;
+        }
+        // Index this action's vertex lists by handle once, and skip handles already handled in
+        // this action's selection, so a selection that repeats a handle does not re-scan the
+        // vertex list and re-clone its index vector per occurrence (CWE-400).
+        let vtx_by_handle: HashMap<Handle, &Vec<i32>> = vertices.iter().rev().map(|(vh, i)| (*vh, i)).collect();
+        let mut handled: HashSet<Handle> = HashSet::new();
+        for h in &a.selection {
+            if !handled.insert(*h) {
+                continue;
+            }
+            if let Some(node) = self.param_of.get(h).copied() {
+                // A parameter in the selection is carried along: its points in the frame. Which
+                // points are in it is decided where the dynamic block has them (AutoCAD evaluates
+                // the actions from the block itself, so a point another action has moved out of
+                // the frame still follows).
+                if self.set.contains_key(&node) {
+                    continue;
+                }
+                let Some(cur) = self.value_of(node) else { continue };
+                let home = current(self.m, &BTreeMap::new(), node);
+                self.new.insert(node, shifted(cur, home, frame, v));
+                continue;
+            }
+            let Some(c) = self.copy_of(h) else { continue };
+            let idx = vtx_by_handle.get(h).map(|i| (*i).clone());
+            self.moves.entry(c).or_default().push(Op::Move(idx, v));
+        }
+    }
+}
+
+/// Parameter value `cur` carried by `v`: the points in `frame` (empty: all of them), judged where
+/// the dynamic block has them (`home`), move.
+fn shifted(cur: Val, home: Option<Val>, frame: &[Vec2], v: Vec2) -> Val {
+    let shift = |p: Vec3, at: Option<Vec3>| if frame.is_empty() || in_frame(frame, at.unwrap_or(p).xy()) { p + v.to3(0.0) } else { p };
+    match (cur, home) {
+        (Val::Point(p), Some(Val::Point(h))) => Val::Point(shift(p, Some(h))),
+        (Val::Point(p), _) => Val::Point(shift(p, None)),
+        (Val::Points(b, e), Some(Val::Points(hb, he))) => Val::Points(shift(b, Some(hb)), shift(e, Some(he))),
+        (Val::Points(b, e), _) => Val::Points(shift(b, None), shift(e, None)),
+        (Val::Flip(b, e, f), Some(Val::Flip(hb, he, _))) => Val::Flip(shift(b, Some(hb)), shift(e, Some(he)), f),
+        (Val::Flip(b, e, f), _) => Val::Flip(shift(b, None), shift(e, None), f),
+        (t, _) => t,
+    }
+}
+
 /// Give `insert` a new anonymous block with the plan's values applied (visibility states, and
 /// the stretch and move actions of the changed parameters, with the parameters in their selections
 /// carried along), and record the new values on it.
@@ -557,102 +685,22 @@ fn apply(
     // The dynamic block's objects and the reference's copies of them, by element tag.
     let def_tags: HashMap<Handle, i64> = by_tag(d, &def).into_iter().map(|(t, h)| (h, t)).collect();
     let src_by_tag: HashMap<i64, Handle> = by_tag(d, &src).into_iter().collect();
-    let copy_of = |dh: &Handle| def_tags.get(dh).and_then(|t| src_by_tag.get(t)).copied();
+    let copy_map: HashMap<Handle, Handle> = def_tags.iter().filter_map(|(dh, tag)| Some((*dh, *src_by_tag.get(tag)?))).collect();
+    let copy_of = |dh: &Handle| copy_map.get(dh).copied();
     // New values, starting from the change; actions add the parameters they carry along.
-    let mut new: BTreeMap<i32, Val> = set.clone();
-    let mut moves: HashMap<Handle, Vec<Op>> = HashMap::new();
-    let param_of: HashMap<Handle, i32> = m.parameters.iter().map(|p| (p.handle, p.node)).collect();
+    let mut run = ActionRun {
+        m: &m,
+        values,
+        set,
+        param_of: m.parameters.iter().map(|p| (p.handle, p.node)).collect(),
+        copy_map: &copy_map,
+        new: set.clone(),
+        moves: HashMap::new(),
+    };
     for a in &m.actions {
-        let changed: Vec<&(i32, String)> = a.connections.iter().filter(|(n, _)| set.contains_key(n)).collect();
-        if changed.is_empty() {
-            continue;
-        }
-        // Rotate and flip actions turn or mirror their objects, and carry the parameters in their
-        // selection the same way. A handle the selection repeats is handled once (twice would
-        // turn it twice, or mirror it back).
-        if let Some(t) = turn_or_mirror(&m, values, set, a) {
-            let mut handled: HashSet<Handle> = HashSet::new();
-            for h in &a.selection {
-                if !handled.insert(*h) {
-                    continue;
-                }
-                if let Some(node) = param_of.get(h) {
-                    if set.contains_key(node) {
-                        continue;
-                    }
-                    let Some(cur) = new.get(node).cloned().or_else(|| current(&m, values, *node)) else { continue };
-                    let p = |q: Vec3| t.apply(q.xy()).to3(q.z);
-                    let moved = match cur {
-                        Val::Point(q) => Val::Point(p(q)),
-                        Val::Points(b, e) => Val::Points(p(b), p(e)),
-                        Val::Flip(b, e, f) => Val::Flip(p(b), p(e), f),
-                        other => other,
-                    };
-                    new.insert(*node, moved);
-                    continue;
-                }
-                if let Some(c) = copy_of(h) {
-                    moves.entry(c).or_default().push(Op::Transform(t));
-                }
-            }
-            continue;
-        }
-        let (mult, angle, frame, vertices): (f64, f64, &[Vec2], &[(Handle, Vec<i32>)]) = match &a.kind {
-            ActionKind::Stretch { frame, vertices, multiplier, angle_offset } => (*multiplier, *angle_offset, frame, vertices),
-            ActionKind::Move { multiplier, angle_offset } => (*multiplier, *angle_offset, &[], &[]),
-            _ => continue,
-        };
-        // The two connections give the change in x and y.
-        let comp = |i: usize| {
-            a.connections.get(i).map_or(0.0, |(n, conn)| match (set.get(n), current(&m, values, *n)) {
-                (Some(nv), Some(ov)) => delta(&ov, nv, conn),
-                _ => 0.0,
-            })
-        };
-        let mult = if mult == 0.0 { 1.0 } else { mult };
-        let v = Vec2::new(comp(0), comp(1)).rotate(angle) * mult;
-        if !(v.x.is_finite() && v.y.is_finite()) || (v.x == 0.0 && v.y == 0.0) {
-            continue;
-        }
-        // Index this action's vertex lists by handle once, and skip handles already handled in
-        // this action's selection, so a selection that repeats a handle does not re-scan the
-        // vertex list and re-clone its index vector per occurrence (CWE-400).
-        let vtx_by_handle: HashMap<Handle, &Vec<i32>> = vertices.iter().rev().map(|(vh, i)| (*vh, i)).collect();
-        let mut handled: HashSet<Handle> = HashSet::new();
-        for h in &a.selection {
-            if !handled.insert(*h) {
-                continue;
-            }
-            if let Some(node) = param_of.get(h) {
-                // A parameter in the selection is carried along: its points in the frame. Which
-                // points are in it is decided where the dynamic block has them (AutoCAD evaluates
-                // the actions from the block itself, so a point another action has moved out of
-                // the frame still follows).
-                if set.contains_key(node) {
-                    continue;
-                }
-                let Some(cur) = new.get(node).cloned().or_else(|| current(&m, values, *node)) else { continue };
-                let home = current(&m, &BTreeMap::new(), *node);
-                let shift = |p: Vec3, at: Option<Vec3>| {
-                    if frame.is_empty() || in_frame(frame, at.unwrap_or(p).xy()) { p + v.to3(0.0) } else { p }
-                };
-                let moved = match (cur, home) {
-                    (Val::Point(p), Some(Val::Point(h))) => Val::Point(shift(p, Some(h))),
-                    (Val::Point(p), _) => Val::Point(shift(p, None)),
-                    (Val::Points(b, e), Some(Val::Points(hb, he))) => Val::Points(shift(b, Some(hb)), shift(e, Some(he))),
-                    (Val::Points(b, e), _) => Val::Points(shift(b, None), shift(e, None)),
-                    (Val::Flip(b, e, f), Some(Val::Flip(hb, he, _))) => Val::Flip(shift(b, Some(hb)), shift(e, Some(he)), f),
-                    (Val::Flip(b, e, f), _) => Val::Flip(shift(b, None), shift(e, None), f),
-                    (t, _) => t,
-                };
-                new.insert(*node, moved);
-                continue;
-            }
-            let Some(c) = copy_of(h) else { continue };
-            let idx = vtx_by_handle.get(h).map(|i| (*i).clone());
-            moves.entry(c).or_default().push(Op::Move(idx, v));
-        }
+        run.action(a);
     }
+    let ActionRun { new, moves, .. } = run;
     // Visibility states.
     let mut shown: HashMap<Handle, bool> = HashMap::new();
     for (node, v) in &new {
