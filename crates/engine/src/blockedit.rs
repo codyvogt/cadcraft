@@ -355,8 +355,15 @@ impl DocState {
                 }
             };
             reconcile(&mut self.doc);
-            for step in self.undo.iter_mut().chain(self.redo.iter_mut()) {
-                reconcile(&mut step.doc);
+            if remap.is_empty() {
+                for step in self.undo.iter_mut().chain(self.redo.iter_mut()) {
+                    reconcile(&mut step.doc);
+                }
+            } else {
+                // Older steps hold the handles and graph from before the copy; they can't be
+                // remapped consistently, so the copy starts a new history.
+                self.undo.clear();
+                self.redo.clear();
             }
         }
         let editor = self.doc.clone();

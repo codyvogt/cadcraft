@@ -113,7 +113,9 @@ fn bsaveas_gives_a_dynamic_block_its_own_graph() {
         }
     };
     check(&s);
-    // The editor edits the copy now: saving again keeps its graph and handles.
+    // The editor edits the copy now: saving again keeps its graph and handles. Its history from
+    // before the copy is gone, so an undo can't bring back handles the copy doesn't have.
+    let _ = s.execute("undo", &json!({}));
     s.execute("bsave", &json!({})).unwrap();
     s.execute("bclose", &json!({})).unwrap();
     check(&s);
