@@ -416,6 +416,33 @@ fn bedit_in_the_block_editor_switches_blocks() {
     assert_eq!(s.doc().unwrap().model.len(), model, "the drawing as it was");
 }
 
+/// A block BEDIT can't switch to is refused before it asks about the changes not saved, so the
+/// question never traps the user; `check` asks the same of JSON callers.
+#[test]
+fn bedit_refuses_a_bad_target_before_asking_to_save() {
+    let mut s = Session::new();
+    door(&mut s);
+    s.execute("bedit", &json!({ "name": "Door" })).unwrap();
+    line(&mut s, [1.0, 1.0], [2.0, 2.0]);
+    assert!(s.state().unwrap().block_unsaved());
+    s.script(
+        "BEDIT
+Nope
+",
+    )
+    .unwrap();
+    let message = s.current_prompt().map(|p| p.message).unwrap_or_default();
+    assert!(!message.contains("Save changes"), "no question for a block it can't open: {message}");
+    s.input(cadcraft_engine::Input::Cancel).unwrap();
+    assert_eq!(editor(&s).as_deref(), Some("Door"));
+    assert!(s.state().unwrap().block_unsaved(), "nothing lost");
+    // The check, without switching or saving.
+    assert!(s.execute("bedit", &json!({ "name": "Nope", "check": true })).is_err());
+    assert!(s.execute("bedit", &json!({ "name": "Nope", "create": true, "check": true })).is_ok(), "a new name is fine");
+    assert_eq!(editor(&s).as_deref(), Some("Door"));
+    assert!(s.state().unwrap().block_unsaved());
+}
+
 /// Typed, BEDIT in the Block Editor asks whether to save the changes before it switches.
 #[test]
 fn bedit_typed_in_the_block_editor_asks_to_save_first() {

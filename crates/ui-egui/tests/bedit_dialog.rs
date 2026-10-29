@@ -177,6 +177,21 @@ fn opening_a_drawing_with_authoring_elements_offers_the_block_editor() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A name the Block Editor can't switch to is refused before the dialog asks about the changes not
+/// saved, so the question never traps the user.
+#[test]
+fn a_bad_name_is_refused_before_the_dialog_asks_to_save() {
+    let mut app = app_with_blocks();
+    app.run("bedit", json!({ "name": "door" })).unwrap();
+    app.run("line", json!({ "points": [[0, 0], [0, 4]] })).unwrap();
+    app.start("bedit");
+    app.bedit.name = "*U1".into();
+    assert!(!bedit::confirm(&mut app));
+    assert!(!app.bedit.ask_save, "no question");
+    assert!(app.bedit.error.is_some(), "the dialog says why");
+    assert!(app.session.state().unwrap().block_unsaved(), "nothing lost");
+}
+
 /// In the Block Editor, BEDIT opens the dialog on the block being edited; OK on another block
 /// switches to it, first asking whether to save the changes not saved yet (Cancel goes back).
 #[test]

@@ -287,6 +287,11 @@ pub fn confirm(app: &mut CadApp) -> bool {
     }
     let ask = app.session.state().is_ok_and(|st| st.block_unsaved() && st.block_editor().is_some_and(|b| !b.eq_ignore_ascii_case(&name)));
     if ask {
+        // A block it can't switch to is refused before the question, which would trap the user.
+        if let Err(e) = app.run("bedit", json!({ "name": name, "create": true, "check": true })) {
+            app.bedit.error = Some(e);
+            return false;
+        }
         app.bedit.ask_save = true;
         return false;
     }
