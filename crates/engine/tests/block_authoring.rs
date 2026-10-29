@@ -73,9 +73,15 @@ fn a_linear_stretch_authored_in_json_drives_references() {
     assert_eq!(corners(&s, &i), [(5.0, 5.0), (20.0, 5.0), (20.0, 10.0), (5.0, 10.0)]);
 }
 
+/// The handles of block `name`'s objects.
+fn block_handles(s: &Session, name: &str) -> Vec<Handle> {
+    s.doc().unwrap().block(name).unwrap().entities.iter().map(|e| e.handle).collect()
+}
+
 /// Saved under another name (BSAVEAS), a dynamic block keeps its parameters and actions in a graph
-/// of its own, with objects of its own: references to the copy change as the original's do, and
-/// the original is as it was.
+/// of its own, with objects of its own, and what was unsaved in the editor (a new object and an
+/// action on it) is the copy's: the original is as the drawing had it. The editor goes on with the
+/// copy, so a later BSAVE keeps its graph and handles; references to either change as before.
 #[test]
 fn bsaveas_gives_a_dynamic_block_its_own_graph() {
     let mut s = Session::new();
@@ -84,20 +90,33 @@ fn bsaveas_gives_a_dynamic_block_its_own_graph() {
     s.execute("bparameter", &json!({ "type": "linear", "start": [0, 0], "end": [10, 0], "labelAt": [5, -2] })).unwrap();
     s.execute("baction", &json!({ "parameter": "Distance1", "type": "stretch", "frame": [[8, -1], [12, 6]], "handles": [r, c], "at": [12, -2] }))
         .unwrap();
+    s.execute("bsave", &json!({})).unwrap();
+    // Unsaved: a new circle, moved by the distance.
+    let made = |v: Value| if v["handle"].is_null() { v["handles"][0].clone() } else { v["handle"].clone() };
+    let n = made(s.execute("circle", &json!({ "center": [2, 2], "radius": 0.5 })).unwrap());
+    s.execute("baction", &json!({ "parameter": "Distance1", "type": "move", "handles": [n], "at": [2, -4] })).unwrap();
     s.execute("bsaveas", &json!({ "name": "Box2" })).unwrap();
+    let check = |s: &Session| {
+        let d = s.doc().unwrap();
+        let (a, b) = (dynamic_block(d, "Box").unwrap(), dynamic_block(d, "Box2").expect("the copy has dynamic data"));
+        assert_eq!((a.parameters.len(), a.actions.len()), (1, 1), "the original keeps what the drawing had");
+        assert_eq!((b.parameters.len(), b.actions.len()), (1, 2), "the copy has what the editor had");
+        assert_ne!(a.parameters[0].handle, b.parameters[0].handle, "its own graph objects");
+        let (own, copy) = (block_handles(s, "Box"), block_handles(s, "Box2"));
+        assert!(own.iter().all(|h| !copy.contains(h)), "no handle in two blocks");
+        assert_eq!(a.actions[0].selection, [h(&r), h(&c)], "the original's action is unchanged");
+        for act in &a.actions {
+            assert!(act.selection.iter().all(|x| own.contains(x)), "the original's graph names only its own objects");
+        }
+        for act in &b.actions {
+            assert!(act.selection.iter().all(|x| copy.contains(x)), "{:?} in {:?}", act.selection, copy);
+        }
+    };
+    check(&s);
+    // The editor edits the copy now: saving again keeps its graph and handles.
+    s.execute("bsave", &json!({})).unwrap();
     s.execute("bclose", &json!({})).unwrap();
-    let d = s.doc().unwrap();
-    let (a, b) = (dynamic_block(d, "Box").unwrap(), dynamic_block(d, "Box2").expect("the copy has dynamic data"));
-    assert_eq!((b.parameters.len(), b.actions.len()), (a.parameters.len(), a.actions.len()));
-    assert_ne!(a.parameters[0].handle, b.parameters[0].handle, "its own graph objects");
-    assert_ne!(a.actions[0].handle, b.actions[0].handle);
-    // The copy's action acts on the copy's objects, not the original's.
-    let (own, copy) = (d.block("Box").unwrap(), d.block("Box2").unwrap());
-    let handles = |blk: &cadcraft_engine::doc::Block| blk.entities.iter().map(|e| e.handle).collect::<Vec<_>>();
-    assert!(handles(own).iter().all(|h| !handles(copy).contains(h)), "no handle in two blocks");
-    assert_eq!(b.actions[0].selection.len(), 2);
-    assert!(b.actions[0].selection.iter().all(|h| handles(copy).contains(h)), "{:?} in {:?}", b.actions[0].selection, handles(copy));
-    assert_eq!(a.actions[0].selection, [h(&r), h(&c)], "the original's action is unchanged");
+    check(&s);
 
     // A reference to the copy stretches; the original's reference does too.
     let j = s.execute("insert", &json!({ "name": "Box2", "at": [200, 0] })).unwrap()["handle"].clone();
@@ -105,6 +124,37 @@ fn bsaveas_gives_a_dynamic_block_its_own_graph() {
     assert_eq!(corners(&s, &j), [(5.0, 5.0), (20.0, 5.0), (20.0, 10.0), (5.0, 10.0)]);
     s.execute("blocks.reference.set", &json!({ "handle": i, "name": "Distance1", "value": "12" })).unwrap();
     assert_eq!(corners(&s, &i), [(5.0, 5.0), (17.0, 5.0), (17.0, 10.0), (5.0, 10.0)]);
+}
+
+/// A dynamic block replaced by BSAVEAS with a block that isn't dynamic keeps none of its old graph.
+#[test]
+fn bsaveas_over_a_dynamic_block_leaves_none_of_its_old_graph() {
+    let mut s = Session::new();
+    let (r, c, _) = boxed(&mut s);
+    s.execute("bedit", &json!({ "name": "Box" })).unwrap();
+    s.execute("bparameter", &json!({ "type": "linear", "start": [0, 0], "end": [10, 0], "labelAt": [5, -2] })).unwrap();
+    s.execute("baction", &json!({ "parameter": "Distance1", "type": "stretch", "frame": [[8, -1], [12, 6]], "handles": [r, c], "at": [12, -2] }))
+        .unwrap();
+    s.execute("bsave", &json!({})).unwrap();
+    s.execute("bclose", &json!({})).unwrap();
+    let graph_objects = s.doc().unwrap().foreign.objects.len();
+    // A copy, with a graph of its own.
+    s.execute("bedit", &json!({ "name": "Box" })).unwrap();
+    s.execute("bsaveas", &json!({ "name": "Box2" })).unwrap();
+    s.execute("bclose", &json!({})).unwrap();
+    assert!(dynamic_block(s.doc().unwrap(), "Box2").is_some());
+    assert!(s.doc().unwrap().foreign.objects.len() > graph_objects, "the copy's graph objects");
+    // Plain block "Plain" replaces it.
+    let made = |v: Value| if v["handle"].is_null() { v["handles"][0].clone() } else { v["handle"].clone() };
+    let ci = made(s.execute("circle", &json!({ "center": [50, 50], "radius": 2 })).unwrap());
+    s.execute("block", &json!({ "name": "Plain", "base": [50, 50], "handles": [ci], "keep": "delete" })).unwrap();
+    s.execute("bedit", &json!({ "name": "Plain" })).unwrap();
+    s.execute("bsaveas", &json!({ "name": "Box2", "replace": true })).unwrap();
+    s.execute("bclose", &json!({})).unwrap();
+    let d = s.doc().unwrap();
+    assert!(dynamic_block(d, "Box2").is_none(), "Box2 is the plain block now");
+    assert_eq!(d.foreign.objects.len(), graph_objects, "only Box's graph is left");
+    assert!(dynamic_block(d, "Box").is_some(), "Box is untouched");
 }
 
 #[test]

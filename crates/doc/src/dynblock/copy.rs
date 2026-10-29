@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use crate::foreign::{ForeignExtra, ForeignObject};
 use crate::{Drawing, EntityKind, EntityStore, Handle, RawTag};
 
-use super::write::{dict_entry, guid, record_handle};
+use super::write::{ETAG, dict_entry, guid, record_handle, strip_app};
 use super::{MAX_NODES, dynamic_block};
 
 /// Most objects of one block's dynamic data that are copied.
@@ -68,13 +68,18 @@ fn retarget(tags: &mut [RawTag], map: &HashMap<Handle, Handle>) {
     }
 }
 
-/// The objects of `store` again with new handles (added to `map`): each one's element tag names
-/// the object itself, and a hatch's sources are the new copies.
+/// The objects of `store` again with new handles (added to `map`).
 fn rehandle(d: &mut Drawing, store: &EntityStore, map: &mut HashMap<Handle, Handle>) -> EntityStore {
     for e in store.iter() {
         let n = d.new_handle();
         map.insert(e.handle, n);
     }
+    remap_handles(store, map)
+}
+
+/// The objects of `store` again with the handles `map` gives them: each one's element tag names
+/// the object itself, and a hatch's sources are the new copies.
+pub fn remap_handles(store: &EntityStore, map: &HashMap<Handle, Handle>) -> EntityStore {
     let mut out = EntityStore::new();
     for e in store.iter() {
         let mut c = (**e).clone();
@@ -108,6 +113,41 @@ fn entity_extras(d: &Drawing, store: &EntityStore, map: &HashMap<Handle, Handle>
         .collect()
 }
 
+/// The applications whose record xdata make a block dynamic.
+const DYNAMIC_APPS: [&str; 3] = ["AcDbDynamicBlockTrueName", "AcDbDynamicBlockGUID", ETAG];
+
+/// Block `name`'s (upper case) dynamic data removed: the objects its extension dictionary owns
+/// and its record's dynamic data. What a redefined block's old graph would point at is gone.
+fn remove_definition(d: &mut Drawing, name: &str) {
+    let key = ("BLOCK_RECORD".to_string(), name.to_string());
+    let Some(xdict) = d.foreign.records.get(&key).and_then(|x| x.xdict) else { return };
+    let owned: HashSet<Handle> = owned_subtree(d, xdict).into_iter().collect();
+    let f = std::sync::Arc::make_mut(&mut d.foreign);
+    f.objects.retain(|o| !owned.contains(&o.handle));
+    let empty = f.records.get_mut(&key).is_some_and(|x| {
+        x.xdict = None;
+        DYNAMIC_APPS.iter().for_each(|app| strip_app(&mut x.xdata, app));
+        x.is_empty()
+    });
+    if empty {
+        f.records.remove(&key);
+    }
+}
+
+/// Block `name`'s dynamic data in `d` as `host` has it (BSAVEAS leaves the edited block as it
+/// was: the editor's changes to its graph belong to the copy only).
+pub fn restore_definition(d: &mut Drawing, host: &Drawing, name: &str) {
+    let name = name.trim().to_ascii_uppercase();
+    remove_definition(d, &name);
+    let key = ("BLOCK_RECORD".to_string(), name);
+    let Some(record) = host.foreign.records.get(&key) else { return };
+    let owned: HashSet<Handle> = record.xdict.map(|x| owned_subtree(host, x)).unwrap_or_default().into_iter().collect();
+    let objects: Vec<ForeignObject> = host.foreign.objects.iter().filter(|o| owned.contains(&o.handle)).cloned().collect();
+    let f = std::sync::Arc::make_mut(&mut d.foreign);
+    f.objects.extend(objects);
+    f.records.insert(key, record.clone());
+}
+
 /// Block record xdata `xdata` with the dynamic block's true name and GUID replaced.
 fn rename_in_xdata(xdata: &mut [RawTag], name: &str, guid: &str) {
     let mut app = String::new();
@@ -123,16 +163,21 @@ fn rename_in_xdata(xdata: &mut [RawTag], name: &str, guid: &str) {
 
 /// Make block `to` a copy of dynamic block `from` (BSAVEAS): `store`, the objects it is saved
 /// with, get new handles; the copy has its own evaluation graph and objects, made from the
-/// original's with new handles, and its own true name and GUID. Nothing changes when `from` has no
-/// dynamic data or is `to`.
-pub fn copy_definition(d: &mut Drawing, from: &str, to: &str, store: &mut EntityStore) {
+/// original's with new handles, and its own true name and GUID. What `to` had of dynamic data goes
+/// first (a block replaced by one that isn't dynamic keeps none). Returns the handles the objects
+/// of `store` got, by their old ones; nothing changes when `from` has no dynamic data or is `to`.
+pub fn copy_definition(d: &mut Drawing, from: &str, to: &str, store: &mut EntityStore) -> HashMap<Handle, Handle> {
     let (from_name, to_name) = (from.trim().to_ascii_uppercase(), to.trim().to_ascii_uppercase());
     let key = |n: &str| ("BLOCK_RECORD".to_string(), n.to_string());
-    if from_name == to_name || dynamic_block(d, from).is_none() {
-        return;
+    if from_name == to_name {
+        return HashMap::new();
     }
-    let Some(source) = d.foreign.records.get(&key(&from_name)).cloned() else { return };
-    let Some(xdict) = source.xdict else { return };
+    remove_definition(d, &to_name);
+    if dynamic_block(d, from).is_none() {
+        return HashMap::new();
+    }
+    let Some(source) = d.foreign.records.get(&key(&from_name)).cloned() else { return HashMap::new() };
+    let Some(xdict) = source.xdict else { return HashMap::new() };
     let graph = dict_entry(d, xdict, "ACAD_ENHANCEDBLOCK");
     let owned = owned_subtree(d, xdict);
     let owned_set: HashSet<Handle> = owned.iter().copied().collect();
@@ -162,5 +207,7 @@ pub fn copy_definition(d: &mut Drawing, from: &str, to: &str, store: &mut Entity
     f.objects.extend(copies);
     f.records.insert(key(&to_name), record);
     f.entities.extend(extras);
+    let made = store.iter().filter_map(|e| Some((e.handle, *map.get(&e.handle)?))).collect();
     *store = entities;
+    made
 }

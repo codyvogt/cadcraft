@@ -24,7 +24,7 @@ pub const MAX_ACTION_ITEMS: usize = 10_000;
 
 /// The application name of element tags: the xdata pairing a block's objects with their
 /// copies in references.
-const ETAG: &str = "AcDbBlockRepETag";
+pub(super) const ETAG: &str = "AcDbBlockRepETag";
 
 /// The value AutoCAD gives a grip location component it hasn't evaluated yet (a linear
 /// parameter's end grip).
@@ -603,7 +603,7 @@ pub fn tag_elements(d: &mut Drawing, name: &str, store: &mut EntityStore) {
 }
 
 /// Remove application `app`'s xdata from `xd`.
-fn strip_app(xd: &mut Vec<RawTag>, app: &str) {
+pub(super) fn strip_app(xd: &mut Vec<RawTag>, app: &str) {
     let Some(at) = xd.iter().position(|t| t.code == 1001 && t.value.eq_ignore_ascii_case(app)) else { return };
     let end = xd.iter().skip(at + 1).position(|t| t.code == 1001).map_or(xd.len(), |n| at + 1 + n);
     xd.drain(at..end);

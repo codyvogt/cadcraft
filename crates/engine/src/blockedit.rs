@@ -153,12 +153,22 @@ impl BlockEdit {
     /// The drawing with the editor's objects saved into block `name` (the edited block, or a new
     /// name for BSAVEAS), from `editor`, the editor's drawing.
     pub fn compose(&self, editor: &Drawing, name: &str) -> Result<Drawing> {
+        self.compose_mapped(editor, name).map(|(d, _)| d)
+    }
+
+    /// [`BlockEdit::compose`], and the handles the saved objects got when a dynamic block is saved
+    /// under another name (they are a copy's, with a graph of their own), by their old ones.
+    pub fn compose_mapped(
+        &self,
+        editor: &Drawing,
+        name: &str,
+    ) -> Result<(Drawing, std::collections::HashMap<cadcraft_doc::Handle, cadcraft_doc::Handle>)> {
         // The drawing itself: the editor's drawing is the drawing.
         if self.current {
             if !name.eq_ignore_ascii_case(CURRENT_DRAWING) {
                 return Err(EngineError::Other("The current drawing can't be saved as a block from the Block Editor; use WBLOCK or BLOCK.".into()));
             }
-            return Ok(editor.clone());
+            return Ok((editor.clone(), std::collections::HashMap::new()));
         }
         if refers_to(editor, &editor.model, name) {
             return Err(EngineError::Other(format!("Block \"{name}\" can't contain a reference to itself.")));
@@ -192,16 +202,20 @@ impl BlockEdit {
         b.base.x = self.base.x;
         b.base.y = self.base.y;
         let mut entities = entities;
-        // Saved under another name, a dynamic block's copy has its own graph and objects.
+        // Saved under another name, a dynamic block's copy has its own graph and objects; the
+        // edited block stays as the drawing has it (the editor's changes to its graph are the
+        // copy's).
+        let mut remap = std::collections::HashMap::new();
         if !name.eq_ignore_ascii_case(&self.name) {
-            cadcraft_doc::dynblock::copy_definition(&mut d, &self.name, name, &mut entities);
+            remap = cadcraft_doc::dynblock::copy_definition(&mut d, &self.name, name, &mut entities);
+            cadcraft_doc::dynblock::restore_definition(&mut d, host, &self.name);
         }
         // A dynamic block's objects carry element tags, which its references' copies are paired
         // with; objects added in the editor get theirs here.
         cadcraft_doc::dynblock::tag_elements(&mut d, name, &mut entities);
         b.entities = entities;
         d.blocks.insert(key, Arc::new(b));
-        Ok(d)
+        Ok((d, remap))
     }
 }
 
@@ -318,7 +332,7 @@ impl DocState {
     pub fn save_block_editor(&mut self, as_name: Option<&str>) -> Result<()> {
         let Some(be) = &self.block_edit else { return Err(EngineError::Other("The Block Editor is not open.".into())) };
         let name = as_name.unwrap_or(&be.name).to_string();
-        let d = be.compose(&self.doc, &name)?;
+        let (d, remap) = be.compose_mapped(&self.doc, &name)?;
         let original = d.block(&name).map(|b| b.entities.clone()).unwrap_or_default();
         let name = d.block(&name).map(|b| b.name.clone()).unwrap_or(name);
         // When BSAVEAS saves the block under another name, the editor's drawing and each undo and
@@ -333,6 +347,12 @@ impl DocState {
                 keep_description(editor, &d, &was);
                 editor.blocks.retain(|k, _| !k.eq_ignore_ascii_case(&name));
                 editor.blocks.insert(name.clone(), b.clone());
+                // A dynamic block's copy: the editor edits it from here on, with its graph and
+                // the handles its objects got.
+                if !remap.is_empty() {
+                    editor.foreign = d.foreign.clone();
+                    editor.model = cadcraft_doc::dynblock::remap_handles(&editor.model, &remap);
+                }
             };
             reconcile(&mut self.doc);
             for step in self.undo.iter_mut().chain(self.redo.iter_mut()) {
