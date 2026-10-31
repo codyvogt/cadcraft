@@ -33,6 +33,7 @@ pub(crate) use blocks::is_generated_arrow;
 pub(crate) use blocks::table_block_entities;
 use ctx::Ctx;
 use entity::entity;
+pub(crate) use header::code_page;
 use sections::tags_for;
 
 struct W {
@@ -146,7 +147,7 @@ pub fn entity_groups(d: &Drawing, e: &Entity) -> (String, Vec<Tag>) {
         layers: HashMap::new(),
         reactors: HashMap::new(),
     };
-    let cx = Ctx { target: Version::R2018, ..Ctx::default() };
+    let cx = Ctx { target: Version::R2018, legacy_columns: true, ..Ctx::default() };
     let paper = d.space_of(e.handle).is_some_and(|s| !matches!(s, cadcraft_doc::Space::Model));
     entity(&mut w, d, e, "0", paper, &cx);
     let mut tags = w.t.into_iter();
